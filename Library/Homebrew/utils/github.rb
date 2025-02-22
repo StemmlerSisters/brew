@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "uri"
@@ -7,9 +7,9 @@ require "utils/github/api"
 
 require "system_command"
 
-# Wrapper functions for the GitHub API.
+# A module that interfaces with GitHub, code like PAT scopes, credential handling and API errors.
 #
-# @api private
+# @api internal
 module GitHub
   extend SystemCommand::Mixin
 
@@ -151,17 +151,18 @@ module GitHub
   def self.search_query_string(*main_params, **qualifiers)
     params = main_params
 
-    if (args = qualifiers.fetch(:args, nil))
-      params << if args.from && args.to
-        "created:#{args.from}..#{args.to}"
-      elsif args.from
-        "created:>=#{args.from}"
-      elsif args.to
-        "created:<=#{args.to}"
-      end
+    from = qualifiers.fetch(:from, nil)
+    to = qualifiers.fetch(:to, nil)
+
+    params << if from && to
+      "created:#{from}..#{to}"
+    elsif from
+      "created:>=#{from}"
+    elsif to
+      "created:<=#{to}"
     end
 
-    params += qualifiers.except(:args).flat_map do |key, value|
+    params += qualifiers.except(:args, :from, :to).flat_map do |key, value|
       Array(value).map { |v| "#{key.to_s.tr("_", "-")}:#{v}" }
     end
 
@@ -355,10 +356,17 @@ module GitHub
     end
 
     run_id = check_suite.last["workflowRun"]["databaseId"]
-    artifacts = API.open_rest("#{API_URL}/repos/#{user}/#{repo}/actions/runs/#{run_id}/artifacts", scopes:)
+    artifacts = []
+    per_page = 50
+    API.paginate_rest("#{API_URL}/repos/#{user}/#{repo}/actions/runs/#{run_id}/artifacts",
+                      per_page:, scopes:) do |result|
+      result = result["artifacts"]
+      artifacts.concat(result)
+      break if result.length < per_page
+    end
 
     matching_artifacts =
-      artifacts["artifacts"]
+      artifacts
       .group_by { |art| art["name"] }
       .select { |name| File.fnmatch?(artifact_pattern, name, File::FNM_EXTGLOB) }
       .map { |_, arts| arts.last }
@@ -426,62 +434,53 @@ module GitHub
       )
   }
   def self.sponsorships(user)
-    has_next_page = T.let(true, T::Boolean)
-    after = ""
-    sponsorships = T.let([], T::Array[Hash])
-    errors = T.let([], T::Array[Hash])
-    while has_next_page
-      query = <<~EOS
-          { organization(login: "#{user}") {
-            sponsorshipsAsMaintainer(first: 100 #{after}) {
-              pageInfo {
-                startCursor
-                hasNextPage
-                endCursor
-              }
-              totalCount
-              nodes {
-                tier {
+    query = <<~EOS
+        query($user: String!, $after: String) { organization(login: $user) {
+          sponsorshipsAsMaintainer(first: 100, after: $after) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              tier {
+                monthlyPriceInDollars
+                closestLesserValueTier {
                   monthlyPriceInDollars
-                  closestLesserValueTier {
-                    monthlyPriceInDollars
-                  }
                 }
-                sponsorEntity {
-                  __typename
-                  ... on Organization { login name }
-                  ... on User { login name }
-                }
+              }
+              sponsorEntity {
+                ... on Organization { login name }
+                ... on User { login name }
               }
             }
           }
         }
-      EOS
+      }
+    EOS
+
+    sponsorships = T.let([], T::Array[Hash])
+    errors = T.let([], T::Array[Hash])
+
+    API.paginate_graphql(query, variables: { user: }, scopes: ["user"], raise_errors: false) do |result|
       # Some organisations do not permit themselves to be queried through the
       # API like this and raise an error so handle these errors later.
       # This has been reported to GitHub.
-      result = API.open_graphql(query, scopes: ["user"], raise_errors: false)
       errors += result["errors"] if result["errors"].present?
 
-      current_sponsorships = result["data"]["organization"]["sponsorshipsAsMaintainer"]
+      current_sponsorships = result.dig("data", "organization", "sponsorshipsAsMaintainer")
+      # if `current_sponsorships` is blank, then there should be errors to report.
+      next { "hasNextPage" => false } if current_sponsorships.blank?
 
       # The organisations mentioned above will show up as nil nodes.
       if (nodes = current_sponsorships["nodes"].compact.presence)
         sponsorships += nodes
       end
 
-      if (page_info = current_sponsorships["pageInfo"].presence) &&
-         page_info["hasNextPage"].presence
-        after = %Q(, after: "#{page_info["endCursor"]}")
-      else
-        has_next_page = false
-      end
+      current_sponsorships.fetch("pageInfo")
     end
 
     # Only raise errors if we didn't get any sponsorships.
-    if sponsorships.blank? && errors.present?
-      raise API::Error, errors.map { |e| "#{e["type"]}: #{e["message"]}" }.join("\n")
-    end
+    raise API::Error, errors.map { |e| e["message"] }.join("\n") if sponsorships.blank? && errors.present?
 
     sponsorships.map do |sponsorship|
       sponsor = sponsorship["sponsorEntity"]
@@ -536,8 +535,8 @@ module GitHub
       end
     elsif state == "open" && ENV["GITHUB_REPOSITORY_OWNER"] == "Homebrew"
       # Try use PR API, which might be cheaper on rate limits in some cases.
-      # The rate limit of the search API under GraphQL is unclear as it's
-      # costs the same as any other query accoding to /rate_limit.
+      # The rate limit of the search API under GraphQL is unclear as it
+      # costs the same as any other query according to /rate_limit.
       # The PR API is also not very scalable so limit to Homebrew CI.
       return fetch_open_pull_requests(name, tap_remote_repo, version:)
     end
@@ -628,7 +627,17 @@ module GitHub
     pull_requests || []
   end
 
-  def self.check_for_duplicate_pull_requests(name, tap_remote_repo, state:, file:, quiet:, version: nil)
+  sig {
+    params(
+      name:            String,
+      tap_remote_repo: String,
+      file:            String,
+      quiet:           T::Boolean,
+      state:           T.nilable(String),
+      version:         T.nilable(String),
+    ).void
+  }
+  def self.check_for_duplicate_pull_requests(name, tap_remote_repo, file:, quiet: false, state: nil, version: nil)
     pull_requests = fetch_pull_requests(name, tap_remote_repo, state:, version:)
 
     pull_requests.select! do |pr|
@@ -638,19 +647,25 @@ module GitHub
     end
     return if pull_requests.blank?
 
+    confidence = version ? "are" : "might be"
     duplicates_message = <<~EOS
-      These #{state} pull requests may be duplicates:
+      These #{state} pull requests #{confidence} duplicates:
       #{pull_requests.map { |pr| "#{pr["title"]} #{pr["html_url"]}" }.join("\n")}
     EOS
     error_message = <<~EOS
-      Duplicate PRs should not be opened.
-      Manually open these PRs if you are sure that they are not duplicates.
+      Duplicate PRs must not be opened.
+      Manually open these PRs if you are sure that they are not duplicates (and tell us that in the PR).
     EOS
 
-    if quiet
-      odie error_message
-    else
+    if version
       odie <<~EOS
+        #{duplicates_message.chomp}
+        #{error_message}
+      EOS
+    elsif quiet
+      opoo error_message
+    else
+      opoo <<~EOS
         #{duplicates_message.chomp}
         #{error_message}
       EOS
@@ -658,12 +673,16 @@ module GitHub
   end
 
   def self.get_pull_request_changed_files(tap_remote_repo, pull_request)
-    API.open_rest(url_to("repos", tap_remote_repo, "pulls", pull_request, "files"))
+    files = []
+    API.paginate_rest(url_to("repos", tap_remote_repo, "pulls", pull_request, "files")) do |result|
+      files.concat(result)
+    end
+    files
   end
 
   private_class_method def self.add_auth_token_to_url!(url)
     if API.credentials_type == :env_token
-      url.sub!(%r{^https://github\.com/}, "https://#{API.credentials}@github.com/")
+      url.sub!(%r{^https://github\.com/}, "https://x-access-token:#{API.credentials}@github.com/")
     end
     url
   end
@@ -687,7 +706,7 @@ module GitHub
     old_contents = info[:old_contents]
     additional_files = info[:additional_files] || []
     remote = info[:remote] || "origin"
-    remote_branch = info[:remote_branch] || tap.git_repo.origin_branch_name
+    remote_branch = info[:remote_branch] || tap.git_repository.origin_branch_name
     branch = info[:branch_name]
     commit_message = info[:commit_message]
     previous_branch = info[:previous_branch] || "-"
@@ -695,6 +714,7 @@ module GitHub
     pr_message = info[:pr_message]
 
     sourcefile_path.parent.cd do
+      require "utils/popen"
       git_dir = Utils.popen_read("git", "rev-parse", "--git-dir").chomp
       shallow = !git_dir.empty? && File.exist?("#{git_dir}/shallow")
       changed_files = [sourcefile_path]
@@ -738,6 +758,7 @@ module GitHub
 
         safe_system "git", "add", *changed_files
         safe_system "git", "checkout", "--no-track", "-b", branch, "#{remote}/#{remote_branch}" unless args.commit?
+        Utils::Git.set_name_email!
         safe_system "git", "commit", "--no-edit", "--verbose",
                     "--message=#{commit_message}",
                     "--", *changed_files
@@ -804,15 +825,16 @@ module GitHub
   def self.last_commit(user, repo, ref, version)
     return if Homebrew::EnvConfig.no_github_api?
 
-    output, _, status = Utils::Curl.curl_output(
+    require "utils/curl"
+    result = Utils::Curl.curl_output(
       "--silent", "--head", "--location",
       "--header", "Accept: application/vnd.github.sha",
       url_to("repos", user, repo, "commits", ref).to_s
     )
 
-    return unless status.success?
+    return unless result.status.success?
 
-    commit = output[/^ETag: "(\h+)"/, 1]
+    commit = result.stdout[/^ETag: "(\h+)"/, 1]
     return if commit.blank?
 
     version.update_commit(commit)
@@ -822,24 +844,25 @@ module GitHub
   def self.multiple_short_commits_exist?(user, repo, commit)
     return false if Homebrew::EnvConfig.no_github_api?
 
-    output, _, status = Utils::Curl.curl_output(
+    require "utils/curl"
+    result = Utils::Curl.curl_output(
       "--silent", "--head", "--location",
       "--header", "Accept: application/vnd.github.sha",
       url_to("repos", user, repo, "commits", commit).to_s
     )
 
-    return true unless status.success?
-    return true if output.blank?
+    return true unless result.status.success?
+    return true if (output = result.stdout).blank?
 
     output[/^Status: (200)/, 1] != "200"
   end
 
-  def self.repo_commits_for_user(nwo, user, filter, args, max)
+  def self.repo_commits_for_user(nwo, user, filter, from, to, max)
     return if Homebrew::EnvConfig.no_github_api?
 
     params = ["#{filter}=#{user}"]
-    params << "since=#{DateTime.parse(args.from).iso8601}" if args.from
-    params << "until=#{DateTime.parse(args.to).iso8601}" if args.to
+    params << "since=#{DateTime.parse(from).iso8601}" if from.present?
+    params << "until=#{DateTime.parse(to).iso8601}" if to.present?
 
     commits = []
     API.paginate_rest("#{API_URL}/repos/#{nwo}/commits", additional_query_params: params.join("&")) do |result|
@@ -852,11 +875,11 @@ module GitHub
     commits
   end
 
-  def self.count_repo_commits(nwo, user, args, max: nil)
+  def self.count_repo_commits(nwo, user, from: nil, to: nil, max: nil)
     odie "Cannot count commits, HOMEBREW_NO_GITHUB_API set!" if Homebrew::EnvConfig.no_github_api?
 
-    author_shas = repo_commits_for_user(nwo, user, "author", args, max)
-    committer_shas = repo_commits_for_user(nwo, user, "committer", args, max)
+    author_shas = repo_commits_for_user(nwo, user, "author", from, to, max)
+    committer_shas = repo_commits_for_user(nwo, user, "committer", from, to, max)
     return [0, 0] if author_shas.blank? && committer_shas.blank?
 
     author_count = author_shas.count
@@ -879,46 +902,53 @@ module GitHub
     odie "Cannot count PRs, HOMEBREW_NO_GITHUB_API set!" if Homebrew::EnvConfig.no_github_api?
 
     query = <<~EOS
-      query {
+      query($after: String) {
         viewer {
           login
-          pullRequests(first: 100, states: OPEN) {
+          pullRequests(first: 100, states: OPEN, after: $after) {
+            totalCount
             nodes {
-              headRepositoryOwner {
-                login
+              baseRepository {
+                owner {
+                  login
+                }
               }
             }
             pageInfo {
               hasNextPage
+              endCursor
             }
           }
         }
       }
     EOS
-    graphql_result = API.open_graphql(query)
     puts
 
-    github_user = graphql_result.dig("viewer", "login")
-    odie "Cannot count PRs, cannot get GitHub username from GraphQL API!" if github_user.blank?
+    homebrew_prs_count = 0
 
-    # BrewTestBot can open as many PRs as it wants.
-    return false if github_user.casecmp("brewtestbot").zero?
+    begin
+      API.paginate_graphql(query) do |result|
+        data = result.fetch("viewer")
+        github_user = data.fetch("login")
 
-    prs = graphql_result.dig("viewer", "pullRequests", "nodes")
-    more_graphql_data = graphql_result.dig("viewer", "pullRequests", "pageInfo", "hasNextPage")
-    return false if !more_graphql_data && prs.length < MAXIMUM_OPEN_PRS
+        # BrewTestBot can open as many PRs as it wants.
+        return false if github_user.casecmp?("brewtestbot")
 
-    homebrew_prs_count = graphql_result.dig("viewer", "pullRequests", "nodes").count do |pr|
-      pr["headRepositoryOwner"]["login"] == "Homebrew"
+        pull_requests = data.fetch("pullRequests")
+        return false if pull_requests.fetch("totalCount") < MAXIMUM_OPEN_PRS
+
+        homebrew_prs_count += pull_requests.fetch("nodes").count do |node|
+          node.dig("baseRepository", "owner", "login").casecmp?("homebrew")
+        end
+        return true if homebrew_prs_count >= MAXIMUM_OPEN_PRS
+
+        pull_requests.fetch("pageInfo")
+      end
+    rescue => e
+      # Ignore SAML access errors (https://github.com/Homebrew/brew/issues/18610)
+      raise unless e.message.include?("Resource protected by organization SAML enforcement")
     end
-    return true if homebrew_prs_count >= MAXIMUM_OPEN_PRS
-    return false unless more_graphql_data
-    return false if tap.nil?
 
-    url = "#{API_URL}/repos/#{tap.full_name}/issues?state=open&creator=#{github_user}"
-    rest_result = API.open_rest(url)
-    repo_prs_count = rest_result.count { |issue_or_pr| issue_or_pr.key?("pull_request") }
-
-    repo_prs_count >= MAXIMUM_OPEN_PRS
+    false
   end
 end

@@ -1,11 +1,9 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 # Representation of a system locale.
 #
 # Used to compare the system language and languages defined using the cask `language` stanza.
-#
-# @api private
 class Locale
   # Error when a string cannot be parsed to a `Locale`.
   class ParserError < StandardError

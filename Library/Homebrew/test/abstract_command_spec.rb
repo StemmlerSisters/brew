@@ -22,7 +22,7 @@ RSpec.describe Homebrew::AbstractCommand do
       end
 
       it "allows access to args" do
-        expect(TestCat.new(["--bar", "baz"]).args[:bar]).to eq("baz")
+        expect(TestCat.new(["--bar", "baz"]).args.bar).to eq("baz")
       end
 
       it "raises on invalid args" do
@@ -67,7 +67,6 @@ RSpec.describe Homebrew::AbstractCommand do
           filename = File.basename(file, ".rb")
           require(file)
           command = described_class.command(filename)
-          dir = command.name.start_with?("Homebrew::DevCmd") ? "dev-cmd" : "cmd"
           expect(Pathname(File.join(__dir__, "../#{dir}/#{command.command_name}.rb"))).to exist
         end
       end

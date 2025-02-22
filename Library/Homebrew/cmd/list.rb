@@ -1,4 +1,4 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "abstract_command"
@@ -7,6 +7,7 @@ require "formula"
 require "cli/parser"
 require "cask/list"
 require "system_command"
+require "tab"
 
 module Homebrew
   module Cmd
@@ -36,6 +37,15 @@ module Homebrew
         switch "--pinned",
                description: "List only pinned formulae, or only the specified (pinned) " \
                             "formulae if <formula> are provided. See also `pin`, `unpin`."
+        switch "--installed-on-request",
+               description: "List the formulae installed on request."
+        switch "--installed-as-dependency",
+               description: "List the formulae installed as dependencies."
+        switch "--poured-from-bottle",
+               description: "List the formulae installed from a bottle."
+        switch "--built-from-source",
+               description: "List the formulae compiled from source."
+
         # passed through to ls
         switch "-1",
                description: "Force output to be one entry per line. " \
@@ -54,6 +64,13 @@ module Homebrew
         conflicts "--pinned", "--cask"
         conflicts "--multiple", "--cask"
         conflicts "--pinned", "--multiple"
+        ["--installed-on-request", "--installed-as-dependency",
+         "--poured-from-bottle", "--built-from-source"].each do |flag|
+          conflicts "--cask", flag
+          conflicts "--versions", flag
+          conflicts "--pinned", flag
+          conflicts "-l", flag
+        end
         ["-1", "-l", "-r", "-t"].each do |flag|
           conflicts "--versions", flag
           conflicts "--pinned", flag
@@ -67,7 +84,9 @@ module Homebrew
 
       sig { override.void }
       def run
-        if args.full_name?
+        if args.full_name? &&
+           !(args.installed_on_request? || args.installed_as_dependency? ||
+             args.poured_from_bottle? || args.built_from_source?)
           unless args.cask?
             formula_names = args.no_named? ? Formula.installed : args.named.to_resolved_formulae
             full_formula_names = formula_names.map(&:full_name).sort(&tap_and_name_comparison)
@@ -91,6 +110,43 @@ module Homebrew
         elsif args.versions?
           filtered_list unless args.cask?
           list_casks if args.cask? || (!args.formula? && !args.multiple? && args.no_named?)
+        elsif args.installed_on_request? ||
+              args.installed_as_dependency? ||
+              args.poured_from_bottle? ||
+              args.built_from_source?
+          flags = []
+          flags << "`--installed-on-request`" if args.installed_on_request?
+          flags << "`--installed-as-dependency`" if args.installed_as_dependency?
+          flags << "`--poured-from-bottle`" if args.poured_from_bottle?
+          flags << "`--built-from-source`" if args.built_from_source?
+
+          raise UsageError, "Cannot use #{flags.join(", ")} with formula arguments." unless args.no_named?
+
+          formulae = if args.t?
+            Formula.installed.sort_by { |formula| test("M", formula.rack) }.reverse!
+          elsif args.full_name?
+            Formula.installed.sort { |a, b| tap_and_name_comparison.call(a.full_name, b.full_name) }
+          else
+            Formula.installed.sort
+          end
+          formulae.reverse! if args.r?
+          formulae.each do |formula|
+            tab = Tab.for_formula(formula)
+
+            statuses = []
+            statuses << "installed on request" if args.installed_on_request? && tab.installed_on_request
+            statuses << "installed as dependency" if args.installed_as_dependency? && tab.installed_as_dependency
+            statuses << "poured from bottle" if args.poured_from_bottle? && tab.poured_from_bottle
+            statuses << "built from source" if args.built_from_source? && !tab.poured_from_bottle
+            next if statuses.empty?
+
+            name = args.full_name? ? formula.full_name : formula.name
+            if flags.count > 1
+              puts "#{name}: #{statuses.join(", ")}"
+            else
+              puts name
+            end
+          end
         elsif args.no_named?
           ENV["CLICOLOR"] = nil
 
@@ -118,13 +174,14 @@ module Homebrew
             system_command! "find", args: casks.map(&:caskroom_path) + find_args, print_stdout: true if casks.present?
           else
             kegs.each { |keg| PrettyListing.new keg } if kegs.present?
-            list_casks if casks.present?
+            Cask::List.list_casks(*casks, one: args.public_send(:"1?")) if casks.present?
           end
         end
       end
 
       private
 
+      sig { void }
       def filtered_list
         names = if args.no_named?
           Formula.racks
@@ -154,9 +211,18 @@ module Homebrew
         end
       end
 
+      sig { void }
       def list_casks
         casks = if args.no_named?
-          Cask::Caskroom.casks
+          cask_paths = Cask::Caskroom.path.children.map do |path|
+            if path.symlink?
+              real_path = path.realpath
+              real_path.basename.to_s
+            else
+              path.basename.to_s
+            end
+          end.uniq.sort
+          cask_paths.map { |name| Cask::CaskLoader.load(name) }
         else
           filtered_args = args.named.dup.delete_if do |n|
             Homebrew.failed = true unless Cask::Caskroom.path.join(n).exist?
@@ -177,7 +243,9 @@ module Homebrew
     end
 
     class PrettyListing
+      sig { params(path: T.any(String, Pathname, Keg)).void }
       def initialize(path)
+        valid_lib_extensions = [".dylib", ".pc"]
         Pathname.new(path).children.sort_by { |p| p.to_s.downcase }.each do |pn|
           case pn.basename.to_s
           when "bin", "sbin"
@@ -185,7 +253,7 @@ module Homebrew
           when "lib"
             print_dir pn do |pnn|
               # dylibs have multiple symlinks and we don't care about them
-              (pnn.extname == ".dylib" || pnn.extname == ".pc") && !pnn.symlink?
+              valid_lib_extensions.include?(pnn.extname) && !pnn.symlink?
             end
           when ".brew"
             next # Ignore .brew
@@ -205,7 +273,8 @@ module Homebrew
 
       private
 
-      def print_dir(root)
+      sig { params(root: Pathname, block: T.nilable(T.proc.params(arg0: Pathname).returns(T::Boolean))).void }
+      def print_dir(root, &block)
         dirs = []
         remaining_root_files = []
         other = ""
@@ -213,7 +282,7 @@ module Homebrew
         root.children.sort.each do |pn|
           if pn.directory?
             dirs << pn
-          elsif block_given? && yield(pn)
+          elsif block && yield(pn)
             puts pn
             other = "other "
           elsif pn.basename.to_s != ".DS_Store"
@@ -230,6 +299,7 @@ module Homebrew
         print_remaining_files remaining_root_files, root, other
       end
 
+      sig { params(files: T::Array[Pathname], root: Pathname, other: String).void }
       def print_remaining_files(files, root, other = "")
         if files.length == 1
           puts files

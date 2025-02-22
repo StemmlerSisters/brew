@@ -1,8 +1,9 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "abstract_command"
 require "fileutils"
+require "hardware"
 require "system_command"
 
 module Homebrew
@@ -21,14 +22,14 @@ module Homebrew
         switch "--online",
                description: "Include tests that use the GitHub API and tests that use any of the taps for " \
                             "official external commands."
-        switch "--byebug",
-               description: "Enable debugging using byebug."
+        switch "--debug",
+               description: "Enable debugging using `ruby/debug`, or surface the standard `odebug` output."
         switch "--changed",
                description: "Only runs tests on files that were changed from the master branch."
         switch "--fail-fast",
                description: "Exit early on the first failing test."
         flag   "--only=",
-               description: "Run only <test_script>`_spec.rb`. Appending `:`<line_number> will start at a " \
+               description: "Run only `<test_script>_spec.rb`. Appending `:<line_number>` will start at a " \
                             "specific line."
         flag   "--profile=",
                description: "Run the test suite serially to find the <n> slowest tests."
@@ -45,16 +46,14 @@ module Homebrew
         # Given we might be testing various commands, we probably want everything (except sorbet-static)
         Homebrew.install_bundler_gems!(groups: Homebrew.valid_gem_groups - ["sorbet"])
 
-        require "byebug" if args.byebug?
-
         HOMEBREW_LIBRARY_PATH.cd do
           setup_environment!
 
           parallel = true
 
-          files = if args.only
-            # FIXME: This is safe once args are namespaced by command
-            test_name, line = T.unsafe(args.only).split(":", 2)
+          only = args.only
+          files = if only
+            test_name, line = only.split(":", 2)
 
             if line.nil?
               Dir.glob("test/{#{test_name},#{test_name}/**/*}_spec.rb")
@@ -69,7 +68,7 @@ module Homebrew
           end
 
           if files.blank?
-            raise UsageError, "The `--only` argument requires a valid file or folder name!" if args.only
+            raise UsageError, "The `--only` argument requires a valid file or folder name!" if only
 
             if args.changed?
               opoo "No tests are directly associated with the changed files!"
@@ -77,7 +76,13 @@ module Homebrew
             end
           end
 
-          parallel = false if args.profile
+          # We use `ParallelTests.last_process?` in `test/spec_helper.rb` to
+          # handle SimpleCov output but, due to how the method is implemented,
+          # it doesn't work as expected if the number of processes is greater
+          # than one but lower than the number of CPU cores in the execution
+          # environment. Coverage information isn't saved in that scenario,
+          # so we disable parallel testing as a workaround in this case.
+          parallel = false if args.profile || (args.coverage? && files.length < Hardware::CPU.cores)
 
           parallel_rspec_log_name = "parallel_runtime_rspec"
           parallel_rspec_log_name = "#{parallel_rspec_log_name}.generic" if args.generic?
@@ -137,15 +142,13 @@ module Homebrew
 
           puts "Randomized with seed #{seed}"
 
-          # Submit test flakiness information using BuildPulse
-          # BUILDPULSE used in spec_helper.rb
-          if use_buildpulse?
-            ENV["BUILDPULSE"] = "1"
-            ohai "Running tests with BuildPulse-friendly settings"
-          end
+          ENV["HOMEBREW_DEBUG"] = "1" if args.debug? # Used in spec_helper.rb to require the "debug" gem.
 
           # Workaround for:
+          #
+          # ```
           # ruby: no -r allowed while running setuid (SecurityError)
+          # ```
           Process::UID.change_privilege(Process.euid) if Process.euid != Process.uid
 
           if parallel
@@ -155,8 +158,6 @@ module Homebrew
           end
           success = $CHILD_STATUS.success?
 
-          run_buildpulse if use_buildpulse?
-
           return if success
 
           Homebrew.failed = true
@@ -165,36 +166,7 @@ module Homebrew
 
       private
 
-      def use_buildpulse?
-        return @use_buildpulse if defined?(@use_buildpulse)
-
-        @use_buildpulse = ENV["HOMEBREW_BUILDPULSE_ACCESS_KEY_ID"].present? &&
-                          ENV["HOMEBREW_BUILDPULSE_SECRET_ACCESS_KEY"].present? &&
-                          ENV["HOMEBREW_BUILDPULSE_ACCOUNT_ID"].present? &&
-                          ENV["HOMEBREW_BUILDPULSE_REPOSITORY_ID"].present?
-      end
-
-      def run_buildpulse
-        require "formula"
-
-        with_env(HOMEBREW_NO_AUTO_UPDATE: "1", HOMEBREW_NO_BOOTSNAP: "1") do
-          ensure_formula_installed!("buildpulse-test-reporter",
-                                    reason: "reporting test flakiness")
-        end
-
-        ENV["BUILDPULSE_ACCESS_KEY_ID"] = ENV.fetch("HOMEBREW_BUILDPULSE_ACCESS_KEY_ID")
-        ENV["BUILDPULSE_SECRET_ACCESS_KEY"] = ENV.fetch("HOMEBREW_BUILDPULSE_SECRET_ACCESS_KEY")
-
-        ohai "Sending test results to BuildPulse"
-
-        system_command Formula["buildpulse-test-reporter"].opt_bin/"buildpulse-test-reporter",
-                       args: [
-                         "submit", "#{HOMEBREW_LIBRARY_PATH}/test/junit",
-                         "--account-id", ENV.fetch("HOMEBREW_BUILDPULSE_ACCOUNT_ID"),
-                         "--repository-id", ENV.fetch("HOMEBREW_BUILDPULSE_REPOSITORY_ID")
-                       ]
-      end
-
+      sig { returns(T::Array[String]) }
       def changed_test_files
         changed_files = Utils.popen_read("git", "diff", "--name-only", "master")
 
@@ -212,6 +184,7 @@ module Homebrew
         end.select(&:exist?)
       end
 
+      sig { returns(T::Array[String]) }
       def setup_environment!
         # Cleanup any unwanted user configuration.
         allowed_test_env = %w[
@@ -242,10 +215,10 @@ module Homebrew
         ENV["HOMEBREW_TEST_GENERIC_OS"] = "1" if args.generic?
         ENV["HOMEBREW_TEST_ONLINE"] = "1" if args.online?
         ENV["HOMEBREW_SORBET_RUNTIME"] = "1"
+        ENV["HOMEBREW_NO_FORCE_BREW_WRAPPER"] = "1"
 
         # TODO: remove this and fix tests when possible.
         ENV["HOMEBREW_NO_INSTALL_FROM_API"] = "1"
-        ENV.delete("HOMEBREW_INTERNAL_JSON_V3")
 
         ENV["USER"] ||= system_command!("id", args: ["-nu"]).stdout.chomp
 

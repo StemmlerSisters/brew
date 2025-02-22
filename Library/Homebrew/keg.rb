@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "keg_relocate"
@@ -7,8 +7,6 @@ require "lock_file"
 require "extend/cachable"
 
 # Installation prefix of a formula.
-#
-# @api private
 class Keg
   extend Cachable
 
@@ -79,39 +77,7 @@ class Keg
 
   # Locale-specific directories have the form `language[_territory][.codeset][@modifier]`
   LOCALEDIR_RX = %r{(locale|man)/([a-z]{2}|C|POSIX)(_[A-Z]{2})?(\.[a-zA-Z\-0-9]+(@.+)?)?}
-  INFOFILE_RX = %r{info/([^.].*?\.info|dir)$}
-  KEG_LINK_DIRECTORIES = %w[
-    bin etc include lib sbin share var
-  ].freeze
-  MUST_EXIST_SUBDIRECTORIES = (
-    KEG_LINK_DIRECTORIES - %w[var] + %w[
-      opt
-      var/homebrew/linked
-    ]
-  ).map { |dir| HOMEBREW_PREFIX/dir }.sort.uniq.freeze
-
-  # Keep relatively in sync with
-  # {https://github.com/Homebrew/install/blob/HEAD/install.sh}
-  MUST_EXIST_DIRECTORIES = (MUST_EXIST_SUBDIRECTORIES + [
-    HOMEBREW_CELLAR,
-  ].sort.uniq).freeze
-  MUST_BE_WRITABLE_DIRECTORIES = (
-    %w[
-      etc/bash_completion.d lib/pkgconfig
-      share/aclocal share/doc share/info share/locale share/man
-      share/man/man1 share/man/man2 share/man/man3 share/man/man4
-      share/man/man5 share/man/man6 share/man/man7 share/man/man8
-      share/zsh share/zsh/site-functions
-      var/log
-    ].map { |dir| HOMEBREW_PREFIX/dir } + MUST_EXIST_SUBDIRECTORIES + [
-      HOMEBREW_CACHE,
-      HOMEBREW_CELLAR,
-      HOMEBREW_LOCKS,
-      HOMEBREW_LOGS,
-      HOMEBREW_REPOSITORY,
-      Language::Python.homebrew_site_packages,
-    ]
-  ).sort.uniq.freeze
+  INFOFILE_RX = %r{info/([^.].*?\.info(\.gz)?|dir)$}
 
   # These paths relative to the keg's share directory should always be real
   # directories in the prefix, never symlinks.
@@ -148,6 +114,51 @@ class Keg
     Formula.racks.flat_map(&:subdirs).map { |d| new(d) }
   end
 
+  def self.keg_link_directories
+    @keg_link_directories ||= %w[
+      bin etc include lib sbin share var
+    ].freeze
+  end
+
+  def self.must_exist_subdirectories
+    @must_exist_subdirectories ||= (
+    keg_link_directories - %w[var] + %w[
+      opt
+      var/homebrew/linked
+    ]
+  ).map { |dir| HOMEBREW_PREFIX/dir }.sort.uniq.freeze
+  end
+
+  # Keep relatively in sync with
+  # {https://github.com/Homebrew/install/blob/HEAD/install.sh}
+  def self.must_exist_directories
+    @must_exist_directories ||= (must_exist_subdirectories + [
+      HOMEBREW_CELLAR,
+    ].sort.uniq).freeze
+  end
+
+  # Keep relatively in sync with
+  # {https://github.com/Homebrew/install/blob/HEAD/install.sh}
+  def self.must_be_writable_directories
+    @must_be_writable_directories ||= (
+    %w[
+      etc/bash_completion.d lib/pkgconfig
+      share/aclocal share/doc share/info share/locale share/man
+      share/man/man1 share/man/man2 share/man/man3 share/man/man4
+      share/man/man5 share/man/man6 share/man/man7 share/man/man8
+      share/zsh share/zsh/site-functions
+      var/log
+    ].map { |dir| HOMEBREW_PREFIX/dir } + must_exist_subdirectories + [
+      HOMEBREW_CACHE,
+      HOMEBREW_CELLAR,
+      HOMEBREW_LOCKS,
+      HOMEBREW_LOGS,
+      HOMEBREW_REPOSITORY,
+      Language::Python.homebrew_site_packages,
+    ]
+  ).sort.uniq.freeze
+  end
+
   attr_reader :path, :name, :linked_keg_record, :opt_record
 
   protected :path
@@ -155,9 +166,10 @@ class Keg
   extend Forwardable
 
   def_delegators :path,
-                 :to_s, :hash, :abv, :disk_usage, :file_count, :directory?, :exist?, :/,
+                 :to_path, :hash, :abv, :disk_usage, :file_count, :directory?, :exist?, :/,
                  :join, :rename, :find
 
+  sig { params(path: Pathname).void }
   def initialize(path)
     path = path.resolved_path if path.to_s.start_with?("#{HOMEBREW_PREFIX}/opt/")
     raise "#{path} is not a valid keg" if path.parent.parent.realpath != HOMEBREW_CELLAR.realpath
@@ -175,7 +187,8 @@ class Keg
     path.parent
   end
 
-  alias to_path to_s
+  sig { returns(String) }
+  def to_s = path.to_s
 
   sig { returns(String) }
   def inspect
@@ -193,6 +206,8 @@ class Keg
       return false if file.directory? && !file.children.reject(&:ds_store?).empty?
 
       basename = file.basename.to_s
+
+      require "metafiles"
       next if Metafiles.copy?(basename)
       next if %w[.DS_Store INSTALL_RECEIPT.json].include?(basename)
 
@@ -266,7 +281,7 @@ class Keg
       LinkageCacheStore.new(path, db).delete!
     end
 
-    path.rmtree
+    FileUtils.rm_r(path)
     path.parent.rmdir_if_possible
     remove_opt_record if optlinked?
     remove_linked_keg_record if linked?
@@ -286,8 +301,8 @@ class Keg
 
     dirs = []
 
-    keg_directories = KEG_LINK_DIRECTORIES.map { |d| path/d }
-                                          .select(&:exist?)
+    keg_directories = self.class.keg_link_directories.map { |d| path/d }
+                          .select(&:exist?)
     keg_directories.each do |dir|
       dir.find do |src|
         dst = HOMEBREW_PREFIX + src.relative_path_from(path)
@@ -314,7 +329,7 @@ class Keg
     unless dry_run
       remove_old_aliases
       remove_linked_keg_record if linked?
-      dirs.reverse_each(&:rmdir_if_possible)
+      (dirs - self.class.must_exist_subdirectories).reverse_each(&:rmdir_if_possible)
     end
 
     ObserverPathnameExtension.n
@@ -373,6 +388,7 @@ class Keg
     (path/"share/emacs/site-lisp"/name).children.any? { |f| ELISP_EXTENSIONS.include? f.extname }
   end
 
+  sig { returns(PkgVersion) }
   def version
     require "pkg_version"
     PkgVersion.parse(path.basename.to_s)
@@ -505,6 +521,7 @@ class Keg
     end
   end
 
+  sig { returns(Tab) }
   def tab
     Tab.for_keg(self)
   end
@@ -551,8 +568,8 @@ class Keg
 
     src = dst.resolved_path
 
-    # src itself may be a symlink, so check lstat to ensure we are dealing with
-    # a directory, and not a symlink pointing at a directory (which needs to be
+    # `src` itself may be a symlink, so check lstat to ensure we are dealing with
+    # a directory and not a symlink pointing to a directory (which needs to be
     # treated as a file). In other words, we only want to resolve one symlink.
 
     begin

@@ -5,7 +5,7 @@ RSpec.describe Cask::DSL, :cask do
   let(:token) { "basic-cask" }
 
   describe "stanzas" do
-    it "lets you set url, homepage, and version" do
+    it "lets you set url, homepage and version" do
       expect(cask.url.to_s).to eq("https://brew.sh/TestCask-1.2.3.dmg")
       expect(cask.homepage).to eq("https://brew.sh/")
       expect(cask.version.to_s).to eq("1.2.3")
@@ -501,7 +501,7 @@ RSpec.describe Cask::DSL, :cask do
 
       it "allows installer manual to be specified" do
         installer = cask.artifacts.first
-        expect(installer).to be_a(Cask::Artifact::Installer::ManualInstaller)
+        expect(installer.instance_variable_get(:@manual_install)).to be true
         expect(installer.path).to eq(Pathname("Caffeine.app"))
       end
     end

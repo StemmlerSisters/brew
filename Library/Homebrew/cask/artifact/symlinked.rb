@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "cask/artifact/relocated"
@@ -6,8 +6,6 @@ require "cask/artifact/relocated"
 module Cask
   module Artifact
     # Superclass for all artifacts which are installed by symlinking them to the target location.
-    #
-    # @api private
     class Symlinked < Relocated
       sig { returns(String) }
       def self.link_type_english_name
@@ -64,7 +62,7 @@ module Cask
         end
 
         ohai "Linking #{self.class.english_name} '#{source.basename}' to '#{target}'"
-        create_filesystem_link(command:)
+        create_filesystem_link(command)
       end
 
       def unlink(command: nil, **)
@@ -74,14 +72,10 @@ module Cask
         Utils.gain_permissions_remove(target, command:)
       end
 
-      def create_filesystem_link(command: nil)
-        Utils.gain_permissions_mkpath(target.dirname, command:)
-
-        command.run! "/bin/ln", args: ["-h", "-f", "-s", "--", source, target],
-                                sudo: !target.dirname.writable?
-
-        add_altname_metadata(source, target.basename, command:)
-      end
+      sig { params(command: T.class_of(SystemCommand)).void }
+      def create_filesystem_link(command); end
     end
   end
 end
+
+require "extend/os/cask/artifact/symlinked"

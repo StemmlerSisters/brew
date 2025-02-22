@@ -1,12 +1,10 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "system_command"
 
 module Utils
   # Helper functions for querying SVN information.
-  #
-  # @api private
   module Svn
     class << self
       include SystemCommand::Mixin
@@ -21,7 +19,7 @@ module Utils
         return @version if defined?(@version)
 
         stdout, _, status = system_command(HOMEBREW_SHIMS_PATH/"shared/svn", args: ["--version"], print_stderr: false)
-        @version = status.success? ? stdout.chomp[/svn, version (\d+(?:\.\d+)*)/, 1] : nil
+        @version = T.let(status.success? ? stdout.chomp[/svn, version (\d+(?:\.\d+)*)/, 1] : nil, T.nilable(String))
       end
 
       sig { params(url: String).returns(T::Boolean) }
@@ -36,7 +34,7 @@ module Utils
         system_command("svn", args: args.concat(invalid_cert_flags), print_stderr: false).success?
       end
 
-      sig { returns(Array) }
+      sig { returns(T::Array[String]) }
       def invalid_cert_flags
         opoo "Ignoring Subversion certificate errors!"
         args = ["--non-interactive", "--trust-server-cert"]
@@ -46,6 +44,7 @@ module Utils
         args
       end
 
+      sig { void }
       def clear_version_cache
         remove_instance_variable(:@version) if defined?(@version)
       end

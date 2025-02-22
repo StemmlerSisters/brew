@@ -1,8 +1,9 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "ipaddr"
 require "extend/on_system"
+require "utils/service"
 
 module Homebrew
   # The {Service} class implements the DSL methods used in a formula's
@@ -152,8 +153,7 @@ module Homebrew
       when true, false
         @keep_alive = { always: value }
       when Hash
-        hash = T.cast(value, Hash)
-        unless (hash.keys - KEEP_ALIVE_KEYS).empty?
+        unless (value.keys - KEEP_ALIVE_KEYS).empty?
           raise TypeError, "Service#keep_alive allows only #{KEEP_ALIVE_KEYS}"
         end
 
@@ -455,18 +455,8 @@ module Homebrew
     # @return [String]
     sig { returns(String) }
     def to_systemd_unit
-      unit = <<~EOS
-        [Unit]
-        Description=Homebrew generated unit for #{@formula.name}
-
-        [Install]
-        WantedBy=default.target
-
-        [Service]
-      EOS
-
       # command needs to be first because it initializes all other values
-      cmd = command&.map { |arg| Utils::Shell.sh_quote(arg) }
+      cmd = command&.map { |arg| Utils::Service.systemd_quote(arg) }
                    &.join(" ")
 
       options = []
@@ -482,24 +472,22 @@ module Homebrew
       options << "StandardError=append:#{File.expand_path(@error_log_path)}" if @error_log_path.present?
       options += @environment_variables.map { |k, v| "Environment=\"#{k}=#{v}\"" } if @environment_variables.present?
 
-      unit + options.join("\n")
+      <<~SYSTEMD
+        [Unit]
+        Description=Homebrew generated unit for #{@formula.name}
+
+        [Install]
+        WantedBy=default.target
+
+        [Service]
+        #{options.join("\n")}
+      SYSTEMD
     end
 
     # Returns a `String` systemd unit timer.
     # @return [String]
     sig { returns(String) }
     def to_systemd_timer
-      timer = <<~EOS
-        [Unit]
-        Description=Homebrew generated timer for #{@formula.name}
-
-        [Install]
-        WantedBy=timers.target
-
-        [Timer]
-        Unit=#{service_name}
-      EOS
-
       options = []
       options << "Persistent=true" if @run_type == RUN_TYPE_CRON
       options << "OnUnitActiveSec=#{@interval}" if @run_type == RUN_TYPE_INTERVAL
@@ -510,7 +498,17 @@ module Homebrew
         options << "OnCalendar=#{@cron[:Weekday]}-*-#{@cron[:Month]}-#{@cron[:Day]} #{hours}:#{minutes}:00"
       end
 
-      timer + options.join("\n")
+      <<~SYSTEMD
+        [Unit]
+        Description=Homebrew generated timer for #{@formula.name}
+
+        [Install]
+        WantedBy=timers.target
+
+        [Timer]
+        Unit=#{service_name}
+        #{options.join("\n")}
+      SYSTEMD
     end
 
     # Prepare the service hash for inclusion in the formula API JSON.

@@ -1,11 +1,11 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "cask/artifact/relocated"
 
 module Cask
-  # @api private
   class List
+    sig { params(casks: Cask, one: T::Boolean, full_name: T::Boolean, versions: T::Boolean).void }
     def self.list_casks(*casks, one: false, full_name: false, versions: false)
       output = if casks.any?
         casks.each do |cask|
@@ -28,6 +28,7 @@ module Cask
       end
     end
 
+    sig { params(cask: Cask).void }
     def self.list_artifacts(cask)
       cask.artifacts.group_by(&:class).sort_by { |klass, _| klass.english_name }.each do |klass, artifacts|
         next if [Artifact::Uninstall, Artifact::Zap].include? klass
@@ -42,6 +43,7 @@ module Cask
       end
     end
 
+    sig { params(cask: Cask).returns(String) }
     def self.format_versioned(cask)
       "#{cask}#{cask.installed_version&.prepend(" ")}"
     end

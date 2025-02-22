@@ -19,10 +19,10 @@ module Homebrew
           installed with, plus any appended brew formula options. If <cask> or <formula> are specified,
           upgrade only the given <cask> or <formula> kegs (unless they are pinned; see `pin`, `unpin`).
 
-          Unless `HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set, `brew upgrade` or `brew reinstall` will be run for
+          Unless `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set, `brew upgrade` or `brew reinstall` will be run for
           outdated dependents and dependents with broken linkage, respectively.
 
-          Unless `HOMEBREW_NO_INSTALL_CLEANUP` is set, `brew cleanup` will then be run for the
+          Unless `$HOMEBREW_NO_INSTALL_CLEANUP` is set, `brew cleanup` will then be run for the
           upgraded formulae or, every 30 days, for all formulae.
         EOS
         switch "-d", "--debug",
@@ -60,10 +60,6 @@ module Homebrew
             description: "Fetch the upstream repository to detect if the HEAD installation of the " \
                          "formula is outdated. Otherwise, the repository's HEAD will only be checked for " \
                          "updates when a new stable or development version has been released.",
-          }],
-          [:switch, "--ignore-pinned", {
-            description: "Set a successful exit status even if pinned formulae are not upgraded.",
-            hidden:      true,
           }],
           [:switch, "--keep-tmp", {
             description: "Retain the temporary files created during installation.",
@@ -124,8 +120,9 @@ module Homebrew
 
       sig { override.void }
       def run
-        # Deprecated since this is now the default behavior.
-        odeprecated "`brew upgrade --ignore-pinned`" if args.ignore_pinned?
+        if args.build_from_source? && args.named.empty?
+          raise ArgumentError, "--build-from-source requires at least one formula"
+        end
 
         formulae, casks = args.named.to_resolved_formulae_to_casks
         # If one or more formulae are specified, but no casks were
@@ -133,6 +130,8 @@ module Homebrew
         # try to upgrade all outdated casks.
         only_upgrade_formulae = formulae.present? && casks.blank?
         only_upgrade_casks = casks.present? && formulae.blank?
+
+        formulae = Homebrew::Attestation.sort_formulae_for_install(formulae) if Homebrew::Attestation.enabled?
 
         upgrade_outdated_formulae(formulae) unless only_upgrade_casks
         upgrade_outdated_casks(casks) unless only_upgrade_formulae
@@ -159,8 +158,6 @@ module Homebrew
           end
         end
 
-        Install.perform_preinstall_checks
-
         if formulae.blank?
           outdated = Formula.installed.select do |f|
             f.outdated?(fetch_head: args.fetch_HEAD?)
@@ -175,7 +172,7 @@ module Homebrew
             if latest_keg.nil?
               ofail "#{f.full_specified_name} not installed"
             else
-              opoo "#{f.full_specified_name} #{latest_keg.version} already installed"
+              opoo "#{f.full_specified_name} #{latest_keg.version} already installed" unless args.quiet?
             end
           end
         end
@@ -217,11 +214,12 @@ module Homebrew
           puts formulae_upgrades.join("\n")
         end
 
+        Install.perform_preinstall_checks_once
+
         Upgrade.upgrade_formulae(
           formulae_to_install,
           flags:                      args.flags_only,
           dry_run:                    args.dry_run?,
-          installed_on_request:       args.named.present?,
           force_bottle:               args.force_bottle?,
           build_from_source_formulae: args.build_from_source_formulae,
           interactive:                args.interactive?,
@@ -238,7 +236,6 @@ module Homebrew
           formulae_to_install,
           flags:                      args.flags_only,
           dry_run:                    args.dry_run?,
-          installed_on_request:       args.named.present?,
           force_bottle:               args.force_bottle?,
           build_from_source_formulae: args.build_from_source_formulae,
           interactive:                args.interactive?,
@@ -269,6 +266,7 @@ module Homebrew
           require_sha:         args.require_sha?,
           skip_cask_deps:      args.skip_cask_deps?,
           verbose:             args.verbose?,
+          quiet:               args.quiet?,
           args:,
         )
       end

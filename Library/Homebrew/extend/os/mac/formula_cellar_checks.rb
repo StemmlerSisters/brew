@@ -1,4 +1,4 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "cache_store"
@@ -80,7 +80,7 @@ module FormulaCellarChecks
           #{checker.display_test_output}
       EOS
 
-      tab = Tab.for_keg(keg)
+      tab = keg.tab
       if tab.poured_from_bottle
         output += <<~EOS
           Rebuild this from source with:
@@ -97,7 +97,7 @@ module FormulaCellarChecks
     return unless formula.prefix.directory?
     return if formula.tap&.audit_exception(:flat_namespace_allowlist, formula.name)
 
-    keg = Keg.new(formula.prefix)
+    keg = ::Keg.new(formula.prefix)
     flat_namespace_files = keg.mach_o_files.reject do |file|
       next true unless file.dylib?
 
@@ -112,7 +112,7 @@ module FormulaCellarChecks
 
     <<~EOS
       Libraries were compiled with a flat namespace.
-      This can cause linker errors due to name collisions, and
+      This can cause linker errors due to name collisions and
       is often due to a bug in detecting the macOS version.
         #{flat_namespace_files * "\n  "}
     EOS

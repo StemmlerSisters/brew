@@ -8,19 +8,19 @@ module Homebrew
   module Cmd
     class CleanupCmd < AbstractCommand
       cmd_args do
-        days = Homebrew::EnvConfig::ENVS[:HOMEBREW_CLEANUP_MAX_AGE_DAYS][:default]
+        days = Homebrew::EnvConfig::ENVS[:HOMEBREW_CLEANUP_MAX_AGE_DAYS]&.dig(:default)
         description <<~EOS
           Remove stale lock files and outdated downloads for all formulae and casks,
           and remove old versions of installed formulae. If arguments are specified,
           only do this for the given formulae and casks. Removes all downloads more than
-          #{days} days old. This can be adjusted with `HOMEBREW_CLEANUP_MAX_AGE_DAYS`.
+          #{days} days old. This can be adjusted with `$HOMEBREW_CLEANUP_MAX_AGE_DAYS`.
         EOS
         flag   "--prune=",
                description: "Remove all cache files older than specified <days>. " \
                             "If you want to remove everything, use `--prune=all`."
         switch "-n", "--dry-run",
                description: "Show what would be removed, but do not actually remove anything."
-        switch "-s",
+        switch "-s", "--scrub",
                description: "Scrub the cache, including downloads for even the latest versions. " \
                             "Note that downloads for any installed formulae or casks will still not be deleted. " \
                             "If you want to delete those too: `rm -rf \"$(brew --cache)\"`"

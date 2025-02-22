@@ -1,9 +1,10 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "abstract_command"
 require "fileutils"
 require "tap"
+require "utils/uid"
 
 module Homebrew
   module DevCmd
@@ -36,17 +37,20 @@ module Homebrew
 
         tap = args.named.to_taps.fetch(0)
         odie "Invalid tap name '#{tap}'" unless tap.path.to_s.match?(HOMEBREW_TAP_PATH_REGEX)
+        odie "Tap is already installed!" if tap.installed?
 
         titleized_user = tap.user.dup
-        titleized_repo = tap.repo.dup
+        titleized_repository = tap.repository.dup
         titleized_user[0] = titleized_user[0].upcase
-        titleized_repo[0] = titleized_repo[0].upcase
-        root_url = GitHubPackages.root_url(tap.user, "homebrew-#{tap.repo}") if args.github_packages?
+        titleized_repository[0] = titleized_repository[0].upcase
+        root_url = GitHubPackages.root_url(tap.user, "homebrew-#{tap.repository}") if args.github_packages?
 
         (tap.path/"Formula").mkpath
 
+        # FIXME: https://github.com/errata-ai/vale/issues/818
+        # <!-- vale off -->
         readme = <<~MARKDOWN
-          # #{titleized_user} #{titleized_repo}
+          # #{titleized_user} #{titleized_repository}
 
           ## How do I install these formulae?
 
@@ -54,24 +58,34 @@ module Homebrew
 
           Or `brew tap #{tap}` and then `brew install <formula>`.
 
+          Or, in a [`brew bundle`](https://github.com/Homebrew/homebrew-bundle) `Brewfile`:
+
+          ```ruby
+          tap "#{tap}"
+          brew "<formula>"
+          ```
+
           ## Documentation
 
           `brew help`, `man brew` or check [Homebrew's documentation](https://docs.brew.sh).
         MARKDOWN
+        # <!-- vale on -->
         write_path(tap, "README.md", readme)
 
         actions_main = <<~YAML
           name: brew test-bot
+
           on:
             push:
               branches:
                 - #{branch}
             pull_request:
+
           jobs:
             test-bot:
               strategy:
                 matrix:
-                  os: [ubuntu-22.04, macos-13]
+                  os: [ubuntu-22.04, macos-13, macos-15]
               runs-on: ${{ matrix.os }}
               steps:
                 - name: Set up Homebrew
@@ -79,12 +93,11 @@ module Homebrew
                   uses: Homebrew/actions/setup-homebrew@master
 
                 - name: Cache Homebrew Bundler RubyGems
-                  id: cache
-                  uses: actions/cache@v3
+                  uses: actions/cache@v4
                   with:
                     path: ${{ steps.set-up-homebrew.outputs.gems-path }}
-                    key: ${{ runner.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
-                    restore-keys: ${{ runner.os }}-rubygems-
+                    key: ${{ matrix.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
+                    restore-keys: ${{ matrix.os }}-rubygems-
 
                 - run: brew test-bot --only-cleanup-before
 
@@ -92,31 +105,43 @@ module Homebrew
 
                 - run: brew test-bot --only-tap-syntax
 
-                - run: brew test-bot --only-formulae#{" --root-url=#{root_url}" if root_url}
+                - run: brew test-bot --only-formulae#{" --root-url='#{root_url}'" if root_url}
                   if: github.event_name == 'pull_request'
 
                 - name: Upload bottles as artifact
                   if: always() && github.event_name == 'pull_request'
-                  uses: actions/upload-artifact@v3
+                  uses: actions/upload-artifact@v4
                   with:
-                    name: bottles
+                    name: bottles_${{ matrix.os }}
                     path: '*.bottle.*'
         YAML
 
+        pr_pull_permissions = {
+          "contents"      => "write",
+          "pull-requests" => "write",
+        }
+        pr_pull_env = {
+          "HOMEBREW_GITHUB_API_TOKEN" => "${{ github.token }}",
+        }
+        if args.github_packages?
+          pr_pull_permissions["packages"] = "write"
+          pr_pull_env["HOMEBREW_GITHUB_PACKAGES_TOKEN"] = "${{ github.token }}"
+          pr_pull_env["HOMEBREW_GITHUB_PACKAGES_USER"] = "${{ github.repository_owner }}"
+        end
         actions_publish = <<~YAML
           name: brew pr-pull
+
           on:
             pull_request_target:
               types:
                 - labeled
+
           jobs:
             pr-pull:
               if: contains(github.event.pull_request.labels.*.name, '#{label}')
               runs-on: ubuntu-22.04
               permissions:
-                contents: write
-                packages: #{args.github_packages? ? "write" : "none"}
-                pull-requests: write
+          #{pr_pull_permissions.sort.map { |k, v| "      #{k}: #{v}" }.join("\n")}
               steps:
                 - name: Set up Homebrew
                   uses: Homebrew/actions/setup-homebrew@master
@@ -126,11 +151,9 @@ module Homebrew
 
                 - name: Pull bottles
                   env:
-                    HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-                    HOMEBREW_GITHUB_PACKAGES_TOKEN: ${{ github.token }}
-                    HOMEBREW_GITHUB_PACKAGES_USER: ${{ github.actor }}
+          #{pr_pull_env.sort.map { |k, v| "          #{k}: #{v}" }.join("\n")}
                     PULL_REQUEST: ${{ github.event.pull_request.number }}
-                  run: brew pr-pull --debug --tap=$GITHUB_REPOSITORY $PULL_REQUEST
+                  run: brew pr-pull --debug --tap="$GITHUB_REPOSITORY" "$PULL_REQUEST"
 
                 - name: Push commits
                   uses: Homebrew/actions/git-try-push@master
@@ -142,7 +165,7 @@ module Homebrew
                   if: github.event.pull_request.head.repo.fork == false
                   env:
                     BRANCH: ${{ github.event.pull_request.head.ref }}
-                  run: git push --delete origin $BRANCH
+                  run: git push --delete origin "$BRANCH"
         YAML
 
         (tap.path/".github/workflows").mkpath
@@ -150,16 +173,32 @@ module Homebrew
         write_path(tap, ".github/workflows/publish.yml", actions_publish)
 
         unless args.no_git?
-          cd tap.path do
+          cd tap.path do |path|
             Utils::Git.set_name_email!
             Utils::Git.setup_gpg!
 
             # Would be nice to use --initial-branch here but it's not available in
             # older versions of Git that we support.
             safe_system "git", "-c", "init.defaultBranch=#{branch}", "init"
-            safe_system "git", "add", "--all"
-            safe_system "git", "commit", "-m", "Create #{tap} tap"
-            safe_system "git", "branch", "-m", branch
+
+            args = []
+            git_owner = File.stat(File.join(path, ".git")).uid
+            if git_owner != Process.uid && git_owner == Process.euid
+              # Under Homebrew user model, EUID is permitted to execute commands under the UID.
+              # Root users are never allowed (see brew.sh).
+              args << "-c" << "safe.directory=#{path}"
+            end
+
+            # Use the configuration of the original user, which will have author information and signing keys.
+            Utils::UID.drop_euid do
+              env = { HOME: Utils::UID.uid_home }.compact
+              env[:TMPDIR] = nil if (tmpdir = ENV.fetch("TMPDIR", nil)) && !File.writable?(tmpdir)
+              with_env(env) do
+                safe_system "git", *args, "add", "--all"
+                safe_system "git", *args, "commit", "-m", "Create #{tap} tap"
+                safe_system "git", *args, "branch", "-m", branch
+              end
+            end
           end
         end
 
@@ -175,6 +214,7 @@ module Homebrew
 
       private
 
+      sig { params(tap: Tap, filename: T.any(String, Pathname), content: String).void }
       def write_path(tap, filename, content)
         path = tap.path/filename
         tap.path.mkpath

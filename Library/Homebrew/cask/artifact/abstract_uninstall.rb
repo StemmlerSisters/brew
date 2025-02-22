@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "timeout"
@@ -12,8 +12,6 @@ require "system_command"
 module Cask
   module Artifact
     # Abstract superclass for uninstall artifacts.
-    #
-    # @api private
     class AbstractUninstall < AbstractArtifact
       include SystemCommand::Mixin
 
@@ -40,7 +38,7 @@ module Cask
       def initialize(cask, **directives)
         directives.assert_valid_keys(*ORDERED_DIRECTIVES)
 
-        super(cask, **directives)
+        super
         directives[:signal] = Array(directives[:signal]).flatten.each_slice(2).to_a
         @directives = directives
 
@@ -118,17 +116,20 @@ module Cask
               print_stderr: false,
             ).stdout
             if plist_status.start_with?("{")
-              command.run!(
+              result = command.run(
                 "/bin/launchctl",
                 args:         ["remove", service],
+                must_succeed: sudo,
                 sudo:,
                 sudo_as_root: sudo,
               )
+              next if !sudo && !result.success?
+
               sleep 1
             end
             paths = [
-              +"/Library/LaunchAgents/#{service}.plist",
-              +"/Library/LaunchDaemons/#{service}.plist",
+              "/Library/LaunchAgents/#{service}.plist",
+              "/Library/LaunchDaemons/#{service}.plist",
             ]
             paths.each { |elt| elt.prepend(Dir.home).freeze } unless sudo
             paths = paths.map { |elt| Pathname(elt) }.select(&:exist?)
@@ -410,7 +411,7 @@ module Cask
             next
           end
 
-          if MacOS.undeletable?(resolved_path)
+          if undeletable?(resolved_path)
             opoo "Skipping #{Formatter.identifier(action)} for undeletable path '#{path}'."
             next
           end
@@ -459,26 +460,29 @@ module Cask
       def trash_paths(*paths, command: nil, **_)
         return if paths.empty?
 
-        stdout, stderr, = system_command HOMEBREW_LIBRARY_PATH/"cask/utils/trash.swift",
-                                         args:         paths,
-                                         print_stderr: false
+        stdout, = system_command HOMEBREW_LIBRARY_PATH/"cask/utils/trash.swift",
+                                 args:         paths,
+                                 print_stderr: Homebrew::EnvConfig.developer?
 
-        trashed = stdout.split(":").sort
-        untrashable = stderr.split(":").sort
+        trashed, _, untrashable = stdout.partition("\n")
+        trashed = trashed.split(":")
+        untrashable = untrashable.split(":")
 
-        return trashed, untrashable if untrashable.empty?
-
-        untrashable.delete_if do |path|
+        trashed_with_permissions, untrashable = untrashable.partition do |path|
           Utils.gain_permissions(path, ["-R"], SystemCommand) do
             system_command! HOMEBREW_LIBRARY_PATH/"cask/utils/trash.swift",
                             args:         [path],
-                            print_stderr: false
+                            print_stderr: Homebrew::EnvConfig.developer?
           end
 
           true
         rescue
           false
         end
+
+        trashed += trashed_with_permissions
+
+        return trashed, untrashable if untrashable.empty?
 
         opoo "The following files could not be trashed, please do so manually:"
         $stderr.puts untrashable
@@ -534,6 +538,10 @@ module Cask
           recursive_rmdir(*resolved_paths, **kwargs)
         end
       end
+
+      def undeletable?(target); end
     end
   end
 end
+
+require "extend/os/cask/artifact/abstract_uninstall"

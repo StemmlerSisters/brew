@@ -1,4 +1,4 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "bundle_version"
@@ -16,8 +16,6 @@ module Homebrew
       #
       # This strategy is not applied automatically and it's necessary to use
       # `strategy :extract_plist` in a `livecheck` block to apply it.
-      #
-      # @api private
       class ExtractPlist
         # A priority of zero causes livecheck to skip the strategy. We do this
         # for {ExtractPlist} so we can selectively apply it when appropriate.
@@ -35,17 +33,17 @@ module Homebrew
           URL_MATCH_REGEX.match?(url)
         end
 
-        # @api private
         Item = Struct.new(
-          # @api private
           :bundle_version,
           keyword_init: true,
         ) do
           extend Forwardable
 
+          # @!attribute [r] version
           # @api public
           delegate version: :bundle_version
 
+          # @!attribute [r] short_version
           # @api public
           delegate short_version: :bundle_version
         end
@@ -106,7 +104,7 @@ module Homebrew
             # Create a copy of the `cask` that uses the `livecheck` block URL
             cask_copy = Cask::CaskLoader.load(cask.sourcefile_path)
             cask_copy.allow_reassignment = true
-            cask_copy.url { url }
+            cask_copy.url url
             UnversionedCaskChecker.new(cask_copy)
           else
             UnversionedCaskChecker.new(cask)

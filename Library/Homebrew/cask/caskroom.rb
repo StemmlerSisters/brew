@@ -1,4 +1,4 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "utils/user"
@@ -6,11 +6,11 @@ require "utils/user"
 module Cask
   # Helper functions for interacting with the `Caskroom` directory.
   #
-  # @api private
+  # @api internal
   module Caskroom
     sig { returns(Pathname) }
     def self.path
-      @path ||= HOMEBREW_PREFIX/"Caskroom"
+      @path ||= T.let(HOMEBREW_PREFIX/"Caskroom", T.nilable(Pathname))
     end
 
     # Return all paths for installed casks.
@@ -50,10 +50,13 @@ module Cask
       SystemCommand.run("/usr/bin/chgrp", args: ["admin", path], sudo:)
     end
 
+    # Get all installed casks.
+    #
+    # @api internal
     sig { params(config: T.nilable(Config)).returns(T::Array[Cask]) }
     def self.casks(config: nil)
       tokens.sort.filter_map do |token|
-        CaskLoader.load(token, config:, warn: false)
+        CaskLoader.load_prefer_installed(token, config:, warn: false)
       rescue TapCaskAmbiguityError => e
         T.must(e.loaders.first).load(config:)
       rescue

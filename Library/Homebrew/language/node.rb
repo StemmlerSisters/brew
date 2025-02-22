@@ -55,9 +55,6 @@ module Language
     sig { params(libexec: Pathname).returns(T::Array[String]) }
     def self.std_npm_install_args(libexec)
       setup_npm_environment
-      # tell npm to not install .brew_home by adding it to the .npmignore file
-      # (or creating a new one if no .npmignore file already exists)
-      open(".npmignore", "a") { |f| f.write("\n.brew_home\n") }
 
       pack = pack_for_installation
 
@@ -92,6 +89,10 @@ module Language
 
     # Mixin module for {Formula} adding shebang rewrite features.
     module Shebang
+      extend T::Helpers
+
+      requires_ancestor { Formula }
+
       module_function
 
       # A regex to match potential shebang permutations.
@@ -112,7 +113,7 @@ module Language
 
       sig { params(formula: Formula).returns(Utils::Shebang::RewriteInfo) }
       def detected_node_shebang(formula = T.cast(self, Formula))
-        node_deps = formula.deps.map(&:name).grep(/^node(@.+)?$/)
+        node_deps = formula.deps.select(&:required?).map(&:name).grep(/^node(@.+)?$/)
         raise ShebangDetectionError.new("Node", "formula does not depend on Node") if node_deps.empty?
         raise ShebangDetectionError.new("Node", "formula has multiple Node dependencies") if node_deps.length > 1
 

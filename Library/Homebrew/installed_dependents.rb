@@ -1,11 +1,9 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "cask_dependent"
 
 # Helper functions for installed dependents.
-#
-# @api private
 module InstalledDependents
   module_function
 

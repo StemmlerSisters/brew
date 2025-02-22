@@ -1,4 +1,4 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "abstract_command"
@@ -24,9 +24,9 @@ module Homebrew
     class Audit < AbstractCommand
       cmd_args do
         description <<~EOS
-          Check <formula> for Homebrew coding style violations. This should be run before
-          submitting a new formula or cask. If no <formula>|<cask> are provided, check all
-          locally available formulae and casks and skip style checks. Will exit with a
+          Check <formula> or <cask> for Homebrew coding style violations. This should be run
+          before submitting a new formula or cask. If no <formula> or <cask> are provided, check
+          all locally available formulae and casks and skip style checks. Will exit with a
           non-zero status if any errors are found.
         EOS
         flag   "--os=",
@@ -50,20 +50,18 @@ module Homebrew
                             "`--strict` and `--online`."
         switch "--new-formula",
                replacement: "--new",
-               # odeprecated: change this to true on disable and remove `args.new_formula?` calls
-               disable:     false,
+               disable:     true,
                hidden:      true
         switch "--new-cask",
                replacement: "--new",
-               # odeprecated: change this to true on disable and remove `args.new_formula?` calls
-               disable:     false,
+               disable:     true,
                hidden:      true
         switch "--[no-]signing",
-               description: "Audit for signed apps, which are required on ARM"
+               description: "Audit for app signatures, which are required by macOS on ARM."
         switch "--token-conflicts",
                description: "Audit for token conflicts."
         flag   "--tap=",
-               description: "Check the formulae within the given tap, specified as <user>`/`<repo>."
+               description: "Check formulae and casks within the given tap, specified as <user>`/`<repo>."
         switch "--fix",
                description: "Fix style violations automatically using RuboCop's auto-correct feature."
         switch "--display-cop-names",
@@ -105,9 +103,6 @@ module Homebrew
 
       sig { override.void }
       def run
-        new_cask = args.new? || args.new_cask?
-        new_formula = args.new? || args.new_formula?
-
         Formulary.enable_factory_cache!
 
         os_arch_combinations = args.os_arch_combinations
@@ -115,18 +110,22 @@ module Homebrew
         Homebrew.auditing = true
         Homebrew.inject_dump_stats!(FormulaAuditor, /^audit_/) if args.audit_debug?
 
-        strict = new_formula || args.strict?
-        online = new_formula || args.online?
+        strict = args.new? || args.strict?
+        online = args.new? || args.online?
         tap_audit = args.tap.present?
         skip_style = args.skip_style? || args.no_named? || tap_audit
         no_named_args = T.let(false, T::Boolean)
+
+        gem_groups = ["audit"]
+        gem_groups << "style" unless skip_style
+        Homebrew.install_bundler_gems!(groups: gem_groups)
 
         ENV.activate_extensions!
         ENV.setup_build_environment
 
         audit_formulae, audit_casks = Homebrew.with_no_api_env do # audit requires full Ruby source
           if args.tap
-            Tap.fetch(T.must(args.tap)).then do |tap|
+            Tap.fetch(args.tap).then do |tap|
               [
                 tap.formula_files.map { |path| Formulary.factory(path) },
                 tap.cask_files.map { |path| Cask::CaskLoader.load(path) },
@@ -154,7 +153,7 @@ module Homebrew
                         "brew audit [name ...]"
             end
 
-            args.named.to_formulae_and_casks
+            args.named.to_formulae_and_casks_with_taps
                 .partition { |formula_or_cask| formula_or_cask.is_a?(Formula) }
           end
         end
@@ -164,10 +163,6 @@ module Homebrew
           return
         end
 
-        gem_groups = ["audit"]
-        gem_groups << "style" unless skip_style
-        Homebrew.install_bundler_gems!(groups: gem_groups)
-
         style_files = args.named.to_paths unless skip_style
 
         only_cops = args.only_cops
@@ -176,7 +171,7 @@ module Homebrew
 
         if only_cops
           style_options[:only_cops] = only_cops
-        elsif new_formula || new_cask
+        elsif args.new?
           nil
         elsif except_cops
           style_options[:except_cops] = except_cops
@@ -207,7 +202,7 @@ module Homebrew
 
           only = only_cops ? ["style"] : args.only
           options = {
-            new_formula:,
+            new_formula:         args.new?,
             strict:,
             online:,
             git:                 args.git?,
@@ -262,7 +257,7 @@ module Homebrew
                 # No need for `|| nil` for `--[no-]signing`
                 # because boolean switches are already `nil` if not passed
                 audit_signing:         args.signing?,
-                audit_new_cask:        new_cask || nil,
+                audit_new_cask:        args.new? || nil,
                 audit_token_conflicts: args.token_conflicts? || nil,
                 quarantine:            true,
                 any_named_args:        !no_named_args,
@@ -313,7 +308,7 @@ module Homebrew
           ofail "#{errors_summary}."
         end
 
-        return unless ENV["GITHUB_ACTIONS"]
+        return unless GitHub::Actions.env_set?
 
         annotations = formula_problems.merge(cask_problems).flat_map do |(_, path), problems|
           problems.map do |problem|
@@ -334,6 +329,7 @@ module Homebrew
 
       private
 
+      sig { params(results: T::Hash[[Symbol, Pathname], T::Array[T::Hash[Symbol, T.untyped]]]).void }
       def print_problems(results)
         results.each do |(name, path), problems|
           problem_lines = format_problem_lines(problems)
@@ -348,6 +344,7 @@ module Homebrew
         end
       end
 
+      sig { params(problems: T::Array[T::Hash[Symbol, T.untyped]]).returns(T::Array[String]) }
       def format_problem_lines(problems)
         problems.map do |problem|
           status = " #{Formatter.success("[corrected]")}" if problem.fetch(:corrected)

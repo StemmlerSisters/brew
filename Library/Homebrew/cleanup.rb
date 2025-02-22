@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "utils/bottles"
@@ -6,12 +6,9 @@ require "utils/bottles"
 require "attrable"
 require "formula"
 require "cask/cask_loader"
-require "set"
 
 module Homebrew
   # Helper class for cleaning up the Homebrew cache.
-  #
-  # @api private
   class Cleanup
     CLEANUP_DEFAULT_DAYS = Homebrew::EnvConfig.cleanup_periodic_full_days.to_i.freeze
     private_constant :CLEANUP_DEFAULT_DAYS
@@ -104,13 +101,22 @@ module Homebrew
         package.tap_git_head != git_head
       end
 
+      sig { params(formula: Formula).returns(T::Set[String]) }
+      def excluded_versions_from_cleanup(formula)
+        @excluded_versions_from_cleanup ||= {}
+        @excluded_versions_from_cleanup[formula.name] ||= begin
+          eligible_kegs_for_cleanup = formula.eligible_kegs_for_cleanup(quiet: true)
+          Set.new((formula.installed_kegs - eligible_kegs_for_cleanup).map { |keg| keg.version.to_s })
+        end
+      end
+
       sig { params(pathname: Pathname, scrub: T::Boolean).returns(T::Boolean) }
       def stale_formula?(pathname, scrub)
         return false unless HOMEBREW_CELLAR.directory?
 
         version = if HOMEBREW_BOTTLES_EXTNAME_REGEX.match?(to_s)
           begin
-            Utils::Bottles.resolve_version(pathname)
+            Utils::Bottles.resolve_version(pathname).to_s
           rescue
             nil
           end
@@ -134,6 +140,7 @@ module Homebrew
           nil
         end
 
+        formula_excluded_versions_from_cleanup = nil
         if formula.blank? && formula_name.delete_suffix!("_bottle_manifest")
           formula = begin
             Formulary.from_rack(HOMEBREW_CELLAR/formula_name)
@@ -142,6 +149,9 @@ module Homebrew
           end
 
           return false if formula.blank?
+
+          formula_excluded_versions_from_cleanup = excluded_versions_from_cleanup(formula)
+          return false if formula_excluded_versions_from_cleanup.include?(version.to_s)
 
           # We can't determine an installed rebuild and parsing manifest version cannot be reliably done.
           return false unless formula.latest_version_installed?
@@ -155,11 +165,15 @@ module Homebrew
 
         resource_name = basename_str[/\A.*?--(.*?)--?(?:#{Regexp.escape(version.to_s)})/, 1]
 
+        stable = formula.stable
         if resource_name == "patch"
-          patch_hashes = formula.stable&.patches&.select(&:external?)&.map(&:resource)&.map(&:version)
+          patch_hashes = stable&.patches&.filter_map { _1.resource.version if _1.external? }
           return true unless patch_hashes&.include?(Checksum.new(version.to_s))
-        elsif resource_name && (resource_version = formula.stable&.resources&.dig(resource_name)&.version)
+        elsif resource_name && stable && (resource_version = stable.resources[resource_name]&.version)
           return true if resource_version != version
+        elsif (formula_excluded_versions_from_cleanup ||= excluded_versions_from_cleanup(formula).presence) &&
+              formula_excluded_versions_from_cleanup.include?(version.to_s)
+          return false
         elsif (formula.latest_version_installed? && formula.pkg_version.to_s != version) ||
               formula.pkg_version.to_s > version
           return true
@@ -290,10 +304,15 @@ module Homebrew
           cleanup_formula(formula, quiet:, ds_store: false, cache_db: false)
         end
 
-        Cleanup.autoremove(dry_run: dry_run?) if Homebrew::EnvConfig.autoremove?
+        if ENV["HOMEBREW_AUTOREMOVE"].present?
+          opoo "HOMEBREW_AUTOREMOVE is now a no-op as it is the default behaviour. " \
+               "Set HOMEBREW_NO_AUTOREMOVE=1 to disable it."
+        end
+        Cleanup.autoremove(dry_run: dry_run?) unless Homebrew::EnvConfig.no_autoremove?
 
         cleanup_cache
         cleanup_empty_api_source_directories
+        cleanup_bootsnap
         cleanup_logs
         cleanup_lockfiles
         cleanup_python_site_packages
@@ -313,7 +332,6 @@ module Homebrew
         return if periodic
 
         cleanup_portable_ruby
-        cleanup_bootsnap
       else
         args.each do |arg|
           formula = begin
@@ -371,14 +389,14 @@ module Homebrew
       logs_days = [days, CLEANUP_DEFAULT_DAYS].min
 
       HOMEBREW_LOGS.subdirs.each do |dir|
-        cleanup_path(dir) { dir.rmtree } if self.class.prune?(dir, logs_days)
+        cleanup_path(dir) { FileUtils.rm_r(dir) } if self.class.prune?(dir, logs_days)
       end
     end
 
     def cache_files
       files = cache.directory? ? cache.children : []
       cask_files = (cache/"Cask").directory? ? (cache/"Cask").children : []
-      api_source_files = (cache/"api-source").glob("*/*/*/*/*") # org/repo/git_head/type/file.rb
+      api_source_files = (cache/"api-source").glob("*/*/*/*/*") # `<org>/<repo>/<git_head>/<type>/<token>.rb`
       gh_actions_artifacts = (cache/"gh-actions-artifact").directory? ? (cache/"gh-actions-artifact").children : []
 
       files.map { |path| { path:, type: nil } } +
@@ -410,7 +428,7 @@ module Homebrew
       (downloads - referenced_downloads).each do |download|
         if self.class.incomplete?(download)
           begin
-            LockFile.new(download.basename).with_lock do
+            DownloadLock.new(download).with_lock do
               download.unlink
             end
           rescue OperationInProgressError
@@ -517,7 +535,7 @@ module Homebrew
       end
 
       portable_rubies_to_remove.each do |portable_ruby|
-        cleanup_path(portable_ruby) { portable_ruby.rmtree }
+        cleanup_path(portable_ruby) { FileUtils.rm_r(portable_ruby) }
       end
     end
 
@@ -527,9 +545,11 @@ module Homebrew
 
     def cleanup_bootsnap
       bootsnap = cache/"bootsnap"
-      return unless bootsnap.exist?
+      return unless bootsnap.directory?
 
-      cleanup_path(bootsnap) { bootsnap.rmtree }
+      bootsnap.each_child do |subdir|
+        cleanup_path(subdir) { FileUtils.rm_r(subdir) } if subdir.basename.to_s != Homebrew.bootsnap_key
+      end
     end
 
     def cleanup_cache_db(rack = nil)
@@ -552,7 +572,7 @@ module Homebrew
     end
 
     def rm_ds_store(dirs = nil)
-      dirs ||= Keg::MUST_EXIST_DIRECTORIES + [
+      dirs ||= Keg.must_exist_directories + [
         HOMEBREW_PREFIX/"Caskroom",
       ]
       dirs.select(&:directory?)
@@ -573,8 +593,8 @@ module Homebrew
       HOMEBREW_PREFIX.glob("lib/python*/site-packages").each do |site_packages|
         site_packages.each_child do |child|
           next unless child.directory?
-          # TODO: Work out a sensible way to clean up pip's, setuptools', and wheel's
-          #       {dist,site}-info directories. Alternatively, consider always removing
+          # TODO: Work out a sensible way to clean up `pip`'s, `setuptools`' and `wheel`'s
+          #       `{dist,site}-info` directories. Alternatively, consider always removing
           #       all `-info` directories, because we may not be making use of them.
           next if child.basename.to_s.end_with?("-info")
 
@@ -620,7 +640,7 @@ module Homebrew
       dirs = []
       children_count = {}
 
-      Keg::MUST_EXIST_SUBDIRECTORIES.each do |dir|
+      Keg.must_exist_subdirectories.each do |dir|
         next unless dir.directory?
 
         dir.find do |path|
@@ -636,7 +656,7 @@ module Homebrew
                 path.unlink
               end
             end
-          elsif path.directory? && Keg::MUST_EXIST_SUBDIRECTORIES.exclude?(path)
+          elsif path.directory? && Keg.must_exist_subdirectories.exclude?(path)
             dirs << path
             children_count[path] = path.children.length if dry_run?
           end
@@ -705,7 +725,7 @@ module Homebrew
 
       require "uninstall"
 
-      kegs_by_rack = removable_formulae.map(&:any_installed_keg).group_by(&:rack)
+      kegs_by_rack = removable_formulae.filter_map(&:any_installed_keg).group_by(&:rack)
       Uninstall.uninstall_kegs(kegs_by_rack)
 
       # The installed formula cache will be invalid after uninstalling.

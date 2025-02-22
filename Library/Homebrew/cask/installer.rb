@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "attrable"
@@ -10,21 +10,20 @@ require "cask/config"
 require "cask/download"
 require "cask/migrator"
 require "cask/quarantine"
+require "cask/tab"
 
 require "cgi"
 
 module Cask
   # Installer for a {Cask}.
-  #
-  # @api private
   class Installer
     extend Attrable
 
     def initialize(cask, command: SystemCommand, force: false, adopt: false,
                    skip_cask_deps: false, binaries: true, verbose: false,
                    zap: false, require_sha: false, upgrade: false, reinstall: false,
-                   installed_as_dependency: false, quarantine: true,
-                   verify_download_integrity: true, quiet: false)
+                   installed_as_dependency: false, installed_on_request: true,
+                   quarantine: true, verify_download_integrity: true, quiet: false)
       @cask = cask
       @command = command
       @force = force
@@ -37,13 +36,14 @@ module Cask
       @reinstall = reinstall
       @upgrade = upgrade
       @installed_as_dependency = installed_as_dependency
+      @installed_on_request = installed_on_request
       @quarantine = quarantine
       @verify_download_integrity = verify_download_integrity
       @quiet = quiet
     end
 
     attr_predicate :binaries?, :force?, :adopt?, :skip_cask_deps?, :require_sha?,
-                   :reinstall?, :upgrade?, :verbose?, :zap?, :installed_as_dependency?,
+                   :reinstall?, :upgrade?, :verbose?, :zap?, :installed_as_dependency?, :installed_on_request?,
                    :quarantine?, :quiet?
 
     def self.caveats(cask)
@@ -68,14 +68,15 @@ module Cask
       verify_has_sha if require_sha? && !force?
       check_requirements
 
+      forbidden_tap_check
+      forbidden_cask_and_formula_check
+
       download(quiet:, timeout:)
 
       satisfy_cask_and_formula_dependencies
-
-      forbidden_tap_check
-      forbidden_cask_and_formula_check
     end
 
+    sig { void }
     def stage
       odebug "Cask::Installer#stage"
 
@@ -88,6 +89,7 @@ module Cask
       raise e
     end
 
+    sig { void }
     def install
       start_time = Time.now
       odebug "Cask::Installer#install"
@@ -107,12 +109,18 @@ module Cask
       backup if force? && @cask.staged_path.exist? && @cask.metadata_versioned_path.exist?
 
       oh1 "Installing Cask #{Formatter.identifier(@cask)}"
-      opoo "macOS's Gatekeeper has been disabled for this Cask" unless quarantine?
+      # GitHub Actions globally disables Gatekeeper.
+      opoo "macOS's Gatekeeper has been disabled for this Cask" if !quarantine? && !GitHub::Actions.env_set?
       stage
 
       @cask.config = @cask.default_config.merge(old_config)
 
       install_artifacts(predecessor:)
+
+      tab = Tab.create(@cask)
+      tab.installed_as_dependency = installed_as_dependency?
+      tab.installed_on_request = installed_on_request?
+      tab.write
 
       if (tap = @cask.tap) && tap.should_report_analytics?
         ::Utils::Analytics.report_package_event(:cask_install, package_name: @cask.token, tap_name: tap.name,
@@ -129,23 +137,24 @@ on_request: true)
       raise
     end
 
+    sig { void }
     def check_deprecate_disable
       deprecate_disable_type = DeprecateDisable.type(@cask)
       return if deprecate_disable_type.nil?
 
-      message = DeprecateDisable.message(@cask)
+      message = DeprecateDisable.message(@cask).to_s
       message_full = "#{@cask.token} has been #{message}"
 
       case deprecate_disable_type
       when :deprecated
-        puts "::warning::#{message_full}" if ENV["GITHUB_ACTIONS"]
         opoo message_full
       when :disabled
-        puts "::error::#{message_full}" if ENV["GITHUB_ACTIONS"]
+        GitHub::Actions.puts_annotation_if_env_set(:error, message)
         raise CaskCannotBeInstalledError.new(@cask, message)
       end
     end
 
+    sig { void }
     def check_conflicts
       return unless @cask.conflicts_with
 
@@ -162,6 +171,7 @@ on_request: true)
       end
     end
 
+    sig { void }
     def uninstall_existing_cask
       return unless @cask.installed?
 
@@ -190,6 +200,7 @@ on_request: true)
                                           timeout:)
     end
 
+    sig { void }
     def verify_has_sha
       odebug "Checking cask has checksum"
       return if @cask.sha256 != :no_check
@@ -207,6 +218,12 @@ on_request: true)
       end
     end
 
+    sig { returns(ArtifactSet) }
+    def artifacts
+      @cask.artifacts
+    end
+
+    sig { params(to: Pathname).void }
     def extract_primary_container(to: @cask.staged_path)
       odebug "Extracting primary container"
 
@@ -236,7 +253,6 @@ on_request: true)
 
     sig { params(predecessor: T.nilable(Cask)).void }
     def install_artifacts(predecessor: nil)
-      artifacts = @cask.artifacts
       already_installed_artifacts = []
 
       odebug "Installing artifacts"
@@ -249,7 +265,8 @@ on_request: true)
         next if artifact.is_a?(Artifact::Binary) && !binaries?
 
         artifact.install_phase(
-          command: @command, verbose: verbose?, adopt: adopt?, force: force?, predecessor:,
+          command: @command, verbose: verbose?, adopt: adopt?, auto_updates: @cask.auto_updates,
+          force: force?, predecessor:
         )
         already_installed_artifacts.unshift(artifact)
       end
@@ -275,9 +292,16 @@ on_request: true)
       end
     end
 
+    sig { void }
     def check_requirements
+      check_stanza_os_requirements
       check_macos_requirements
       check_arch_requirements
+    end
+
+    sig { void }
+    def check_stanza_os_requirements
+      nil
     end
 
     def check_macos_requirements
@@ -287,6 +311,7 @@ on_request: true)
       raise CaskError, @cask.depends_on.macos.message(type: :cask)
     end
 
+    sig { void }
     def check_arch_requirements
       return if @cask.depends_on.arch.nil?
 
@@ -302,6 +327,7 @@ on_request: true)
             "but you are running #{@current_arch}."
     end
 
+    sig { returns(T::Array[T.untyped]) }
     def cask_and_formula_dependencies
       return @cask_and_formula_dependencies if @cask_and_formula_dependencies
 
@@ -359,9 +385,11 @@ on_request: true)
             binaries:                binaries?,
             verbose:                 verbose?,
             installed_as_dependency: true,
+            installed_on_request:    false,
             force:                   false,
           ).install
         else
+          Homebrew::Install.perform_preinstall_checks_once
           fi = FormulaInstaller.new(
             cask_or_formula,
             **{
@@ -394,7 +422,7 @@ on_request: true)
 
       extension = @cask.loaded_from_api? ? "json" : "rb"
       (metadata_subdir/"#{@cask.token}.#{extension}").write @cask.source
-      old_savedir&.rmtree
+      FileUtils.rm_r(old_savedir) if old_savedir
     end
 
     def save_config_file
@@ -411,11 +439,18 @@ on_request: true)
       oh1 "Uninstalling Cask #{Formatter.identifier(@cask)}"
       uninstall_artifacts(clear: true, successor:)
       if !reinstall? && !upgrade?
+        remove_tabfile
         remove_download_sha
         remove_config_file
       end
       purge_versioned_files
       purge_caskroom_path if force?
+    end
+
+    def remove_tabfile
+      tabfile = @cask.tab.tabfile
+      FileUtils.rm_f tabfile if tabfile
+      @cask.config_path.parent.rmdir_if_possible
     end
 
     def remove_config_file
@@ -442,8 +477,8 @@ on_request: true)
     def restore_backup
       return if !backup_path.directory? || !backup_metadata_path.directory?
 
-      @cask.staged_path.rmtree if @cask.staged_path.exist?
-      @cask.metadata_versioned_path.rmtree if @cask.metadata_versioned_path.exist?
+      FileUtils.rm_r(@cask.staged_path) if @cask.staged_path.exist?
+      FileUtils.rm_r(@cask.metadata_versioned_path) if @cask.metadata_versioned_path.exist?
 
       backup_path.rename @cask.staged_path
       backup_metadata_path.rename @cask.metadata_versioned_path
@@ -466,8 +501,6 @@ on_request: true)
 
     sig { params(clear: T::Boolean, successor: T.nilable(Cask)).void }
     def uninstall_artifacts(clear: false, successor: nil)
-      artifacts = @cask.artifacts
-
       odebug "Uninstalling artifacts"
       odebug "#{::Utils.pluralize("artifact", artifacts.length, include_count: true)} defined", artifacts
 
@@ -576,15 +609,7 @@ on_request: true)
 
     sig { void }
     def forbidden_tap_check
-      forbidden_taps = Homebrew::EnvConfig.forbidden_taps
-      return if forbidden_taps.blank?
-
-      forbidden_taps_set = Set.new(forbidden_taps.split.filter_map do |tap|
-        Tap.fetch(tap)
-      rescue Tap::InvalidNameError
-        opoo "Invalid tap name in `HOMEBREW_FORBIDDEN_TAPS`: #{tap}"
-        nil
-      end)
+      return if Tap.allowed_taps.blank? && Tap.forbidden_taps.blank?
 
       owner = Homebrew::EnvConfig.forbidden_owner
       owner_contact = if (contact = Homebrew::EnvConfig.forbidden_owner_contact.presence)
@@ -594,27 +619,31 @@ on_request: true)
       unless skip_cask_deps?
         cask_and_formula_dependencies.each do |cask_or_formula|
           dep_tap = cask_or_formula.tap
-          next if dep_tap.blank?
-          next unless forbidden_taps_set.include?(dep_tap)
+          next if dep_tap.blank? || (dep_tap.allowed_by_env? && !dep_tap.forbidden_by_env?)
 
           dep_full_name = cask_or_formula.full_name
-          raise CaskCannotBeInstalledError.new(@cask, <<~EOS
-            The installation of #{@cask} has a dependency #{dep_full_name}
-            but the #{dep_tap} tap was forbidden by #{owner} in `HOMEBREW_FORBIDDEN_TAPS`.#{owner_contact}
-          EOS
-          )
+          error_message = "The installation of #{@cask} has a dependency #{dep_full_name}\n" \
+                          "from the #{dep_tap} tap but #{owner} "
+          error_message << "has not allowed this tap in `HOMEBREW_ALLOWED_TAPS`" unless dep_tap.allowed_by_env?
+          error_message << " and\n" if !dep_tap.allowed_by_env? && dep_tap.forbidden_by_env?
+          error_message << "has forbidden this tap in `HOMEBREW_FORBIDDEN_TAPS`" if dep_tap.forbidden_by_env?
+          error_message << ".#{owner_contact}"
+
+          raise CaskCannotBeInstalledError.new(@cask, error_message)
         end
       end
 
       cask_tap = @cask.tap
-      return if cask_tap.blank?
-      return unless forbidden_taps_set.include?(cask_tap)
+      return if cask_tap.blank? || (cask_tap.allowed_by_env? && !cask_tap.forbidden_by_env?)
 
-      raise CaskCannotBeInstalledError.new(@cask, <<~EOS
-        The installation of #{@cask.full_name} has the tap #{cask_tap}
-        which was forbidden by #{owner} in `HOMEBREW_FORBIDDEN_TAPS`.#{owner_contact}
-      EOS
-      )
+      error_message = "The installation of #{@cask.full_name} has the tap #{cask_tap}\n" \
+                      "but #{owner} "
+      error_message << "has not allowed this tap in `HOMEBREW_ALLOWED_TAPS`" unless cask_tap.allowed_by_env?
+      error_message << " and\n" if !cask_tap.allowed_by_env? && cask_tap.forbidden_by_env?
+      error_message << "has forbidden this tap in `HOMEBREW_FORBIDDEN_TAPS`" if cask_tap.forbidden_by_env?
+      error_message << ".#{owner_contact}"
+
+      raise CaskCannotBeInstalledError.new(@cask, error_message)
     end
 
     sig { void }
@@ -652,15 +681,15 @@ on_request: true)
           next if dep_name.blank?
 
           raise CaskCannotBeInstalledError.new(@cask, <<~EOS
-            The installation of #{@cask} has a dependency #{dep_name}
-            but the #{dep_name} #{dep_type} was forbidden by #{owner} in `#{variable}`.#{owner_contact}
+            has a dependency #{dep_name} but the
+            #{dep_name} #{dep_type} was forbidden for installation by #{owner} in `#{variable}`.#{owner_contact}
           EOS
           )
         end
       end
       return if forbidden_casks.blank?
 
-      cask_name = if forbidden_casks.include?(@cask.token)
+      if forbidden_casks.include?(@cask.token)
         @cask.token
       elsif forbidden_casks.include?(@cask.full_name)
         @cask.full_name
@@ -669,8 +698,7 @@ on_request: true)
       end
 
       raise CaskCannotBeInstalledError.new(@cask, <<~EOS
-        The installation of #{cask_name} was forbidden by #{owner}
-        in `HOMEBREW_FORBIDDEN_CASKS`.#{owner_contact}
+        forbidden for installation by #{owner} in `HOMEBREW_FORBIDDEN_CASKS`.#{owner_contact}
       EOS
       )
     end
@@ -701,3 +729,5 @@ on_request: true)
     end
   end
 end
+
+require "extend/os/cask/installer"

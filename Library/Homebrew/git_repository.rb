@@ -6,7 +6,6 @@ require "utils/popen"
 
 # Given a {Pathname}, provides methods for querying Git repository information.
 # @see Utils::Git
-# @api private
 class GitRepository
   sig { returns(Pathname) }
   attr_reader :pathname
@@ -17,8 +16,15 @@ class GitRepository
   end
 
   sig { returns(T::Boolean) }
-  def git_repo?
+  def git_repository?
     pathname.join(".git").exist?
+  end
+
+  sig { returns(T::Boolean) }
+  def git_repo?
+    # delete this whole function when removing odisabled
+    odeprecated "GitRepository#git_repo?", "GitRepository#git_repository?"
+    git_repository?
   end
 
   # Gets the URL of the Git origin remote.
@@ -30,7 +36,7 @@ class GitRepository
   # Sets the URL of the Git origin remote.
   sig { params(origin: String).returns(T.nilable(T::Boolean)) }
   def origin_url=(origin)
-    return if !git_repo? || !Utils::Git.available?
+    return if !git_repository? || !Utils::Git.available?
 
     safe_system Utils::Git.git, "remote", "set-url", "origin", origin, chdir: pathname
   end
@@ -108,15 +114,13 @@ class GitRepository
   end
 
   sig { returns(String) }
-  def to_s
-    pathname.to_s
-  end
+  def to_s = pathname.to_s
 
   private
 
   sig { params(args: T.untyped, safe: T::Boolean, err: T.nilable(Symbol)).returns(T.nilable(String)) }
   def popen_git(*args, safe: false, err: nil)
-    unless git_repo?
+    unless git_repository?
       return unless safe
 
       raise "Not a Git repository: #{pathname}"

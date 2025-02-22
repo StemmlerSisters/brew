@@ -1,12 +1,10 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "utils/popen"
 
 module Homebrew
   # Helper functions for reading and writing settings.
-  #
-  # @api private
   module Settings
     def self.read(setting, repo: HOMEBREW_REPOSITORY)
       return unless (repo/".git/config").exist?

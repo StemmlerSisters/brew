@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "cli/named_args"
 require "cmd/shared_examples/args_parse"
 require "cmd/uses"
 require "fileutils"
@@ -36,12 +37,30 @@ RSpec.describe Homebrew::Cmd::Uses do
     %w[foo installed].each do |formula_name|
       keg_dir = HOMEBREW_CELLAR/formula_name/"1.0"
       keg_dir.mkpath
-      touch keg_dir/Tab::FILENAME
+      touch keg_dir/AbstractTab::FILENAME
     end
 
     expect { brew "uses", "foo", "--eval-all", "--include-optional", "--missing", "--recursive" }
       .to output(/^(bar\noptional|optional\nbar)$/).to_stdout
       .and not_to_output.to_stderr
       .and be_a_success
+  end
+
+  it "handles unavailable formula", :integration_test do
+    setup_test_formula "foo"
+    setup_test_formula "bar"
+    setup_test_formula "optional", <<~RUBY
+      url "https://brew.sh/optional-1.0"
+      depends_on "bar" => :optional
+    RUBY
+
+    expect_any_instance_of(Homebrew::CLI::NamedArgs)
+      .to receive(:to_formulae)
+      .and_raise(FormulaUnavailableError, "foo")
+    cmd = described_class.new(%w[foo --eval-all --include-optional --recursive])
+    expect { cmd.run }
+      .to output(/^(bar\noptional|optional\nbar)$/).to_stdout
+      .and output(/Error: Missing formulae should not have dependents!\n/).to_stderr
+      .and raise_error SystemExit
   end
 end

@@ -1,12 +1,10 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "cask/audit"
 
 module Cask
   # Helper class for auditing all available languages of a cask.
-  #
-  # @api private
   class Auditor
     def self.audit(cask, **options)
       new(cask, **options).audit

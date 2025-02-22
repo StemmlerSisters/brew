@@ -27,8 +27,6 @@ module Homebrew
                             "to the cask file."
         switch "--no-audit",
                description: "Don't run `brew audit` before opening the PR."
-        switch "--online",
-               hidden:      true
         switch "--no-style",
                description: "Don't run `brew style --fix` before opening the PR."
         switch "--no-browse",
@@ -49,8 +47,6 @@ module Homebrew
                description: "Specify the <SHA-256> checksum of the new download."
         flag   "--fork-org=",
                description: "Use the specified GitHub organization for forking."
-        switch "-f", "--force",
-               hidden: true
 
         conflicts "--dry-run", "--write"
         conflicts "--no-audit", "--online"
@@ -62,9 +58,6 @@ module Homebrew
 
       sig { override.void }
       def run
-        odeprecated "brew bump-cask-pr --online" if args.online?
-        odisabled "brew bump-cask-pr --force" if args.force?
-
         # This will be run by `brew audit` or `brew style` later so run it first to
         # not start spamming during normal output.
         gem_groups = []
@@ -79,14 +72,14 @@ module Homebrew
         # Use the user's browser, too.
         ENV["BROWSER"] = EnvConfig.browser
 
-        cask = args.named.to_casks.first
+        cask = args.named.to_casks.fetch(0)
 
         odie "This cask is not in a tap!" if cask.tap.blank?
         odie "This cask's tap is not a Git repository!" unless cask.tap.git?
 
         odie <<~EOS unless cask.tap.allow_bump?(cask.token)
           Whoops, the #{cask.token} cask has its version update
-          pull requests automatically opened by BrewTestBot!
+          pull requests automatically opened by BrewTestBot every ~3 hours!
           We'd still love your contributions, though, so try another one
           that's not in the autobump list:
             #{Formatter.url("#{cask.tap.remote}/blob/master/.github/autobump.txt")}
@@ -193,8 +186,8 @@ module Homebrew
           cask:              Cask::Cask,
           new_hash:          T.any(NilClass, String, Symbol),
           new_version:       BumpVersionParser,
-          replacement_pairs: T::Array[[T.any(Regexp, String), T.any(Regexp, String)]],
-        ).returns(T::Array[[T.any(Regexp, String), T.any(Regexp, String)]])
+          replacement_pairs: T::Array[[T.any(Regexp, String), T.any(Pathname, String)]],
+        ).returns(T::Array[[T.any(Regexp, String), T.any(Pathname, String)]])
       }
       def replace_version_and_checksum(cask, new_hash, new_version, replacement_pairs)
         # When blocks are absent, arch is not relevant. For consistency, we simulate the arm architecture.
@@ -255,27 +248,20 @@ module Homebrew
 
       sig { params(cask: Cask::Cask, new_version: BumpVersionParser).void }
       def check_pull_requests(cask, new_version:)
-        tap_remote_repo = cask.tap.full_name || cask.tap.remote_repo
+        tap_remote_repo = cask.tap.full_name || cask.tap.remote_repository
 
+        file = cask.sourcefile_path.relative_path_from(cask.tap.path).to_s
+        quiet = args.quiet?
         GitHub.check_for_duplicate_pull_requests(cask.token, tap_remote_repo,
-                                                 state:   "open",
-                                                 version: nil,
-                                                 file:    cask.sourcefile_path.relative_path_from(cask.tap.path).to_s,
-                                                 quiet:   args.quiet?)
+                                                 state: "open", file:, quiet:)
 
-        # if we haven't already found open requests, try for an exact match across closed requests
+        # if we haven't already found open requests, try for an exact match across all pull requests
         new_version.instance_variables.each do |version_type|
-          version = new_version.instance_variable_get(version_type)
-          next if version.blank?
+          version_type_version = new_version.instance_variable_get(version_type)
+          next if version_type_version.blank?
 
-          GitHub.check_for_duplicate_pull_requests(
-            cask.token,
-            tap_remote_repo,
-            state:   "closed",
-            version: shortened_version(version, cask:),
-            file:    cask.sourcefile_path.relative_path_from(cask.tap.path).to_s,
-            quiet:   args.quiet?,
-          )
+          version = shortened_version(version_type_version, cask:)
+          GitHub.check_for_duplicate_pull_requests(cask.token, tap_remote_repo, version:, file:, quiet:)
         end
       end
 

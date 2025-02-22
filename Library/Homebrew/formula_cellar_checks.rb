@@ -1,15 +1,14 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "utils/shell"
 
 # Checks to perform on a formula's cellar.
-#
-# @api private
 module FormulaCellarChecks
   extend T::Helpers
 
   abstract!
+  requires_ancestor { Kernel }
 
   sig { abstract.returns(Formula) }
   def formula; end
@@ -192,6 +191,7 @@ module FormulaCellarChecks
     EOS
   end
 
+  sig { params(lib: Pathname, deps: Dependencies).returns(T.nilable(String)) }
   def check_python_packages(lib, deps)
     return unless lib.directory?
 
@@ -209,7 +209,8 @@ module FormulaCellarChecks
 
     return if pythons.blank?
 
-    python_deps = deps.map(&:name)
+    python_deps = deps.to_a
+                      .map(&:name)
                       .grep(/^python(@.*)?$/)
                       .filter_map { |d| Formula[d].version.to_s[/^\d+\.\d+/] }
 
@@ -251,6 +252,7 @@ module FormulaCellarChecks
     EOS
   end
 
+  sig { params(prefix: Pathname, plist: Pathname).returns(T.nilable(String)) }
   def check_plist(prefix, plist)
     return unless prefix.directory?
 
@@ -413,7 +415,7 @@ module FormulaCellarChecks
 
   sig { void }
   def audit_installed
-    @new_formula ||= false
+    @new_formula ||= T.let(false, T.nilable(T::Boolean))
 
     problem_if_output(check_manpages)
     problem_if_output(check_infopages)
@@ -429,7 +431,7 @@ module FormulaCellarChecks
     problem_if_output(check_elisp_root(formula.share, formula.name))
     problem_if_output(check_python_packages(formula.lib, formula.deps))
     problem_if_output(check_shim_references(formula.prefix))
-    problem_if_output(check_plist(formula.prefix, formula.plist))
+    problem_if_output(check_plist(formula.prefix, formula.launchd_service_path))
     problem_if_output(check_python_symlinks(formula.name, formula.keg_only?))
     problem_if_output(check_cpuid_instruction(formula))
     problem_if_output(check_binary_arches(formula))
@@ -443,8 +445,9 @@ module FormulaCellarChecks
     File.directory?(dir) ? Dir.chdir(dir) { Dir[pattern] } : []
   end
 
-  def cpuid_instruction?(file, objdump = "objdump")
-    @instruction_column_index ||= {}
+  sig { params(file: T.any(Pathname, String), objdump: Pathname).returns(T::Boolean) }
+  def cpuid_instruction?(file, objdump)
+    @instruction_column_index ||= T.let({}, T.nilable(T::Hash[Pathname, Integer]))
     @instruction_column_index[objdump] ||= begin
       objdump_version = Utils.popen_read(objdump, "--version")
 

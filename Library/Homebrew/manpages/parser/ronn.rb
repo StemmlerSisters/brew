@@ -1,4 +1,4 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 require "kramdown/parser/kramdown"
@@ -7,8 +7,6 @@ module Homebrew
   module Manpages
     module Parser
       # Kramdown parser with compatiblity for ronn variable syntax.
-      #
-      # @api private
       class Ronn < ::Kramdown::Parser::Kramdown
         def initialize(*)
           super

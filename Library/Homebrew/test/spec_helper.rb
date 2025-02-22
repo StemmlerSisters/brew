@@ -10,14 +10,19 @@ if ENV["HOMEBREW_TESTS_COVERAGE"]
   ]
   SimpleCov.formatters = SimpleCov::Formatter::MultiFormatter.new(formatters)
 
-  if RUBY_PLATFORM[/darwin/] && ENV["TEST_ENV_NUMBER"]
+  # Needed for outputting coverage reporting only once for parallel_tests.
+  # Otherwise, "Coverage report generated" will get spammed for each process.
+  if ENV["TEST_ENV_NUMBER"]
     SimpleCov.at_exit do
       result = SimpleCov.result
-      result.format! if ParallelTests.number_of_running_processes <= 1
+      # `SimpleCov.result` calls `ParallelTests.wait_for_other_processes_to_finish`
+      # internally for you on the last process.
+      result.format! if ParallelTests.last_process?
     end
   end
 end
 
+require_relative "../standalone"
 require_relative "../warnings"
 
 Warnings.ignore :parser_syntax do
@@ -29,7 +34,6 @@ require "rspec/retry"
 require "rspec/sorbet"
 require "rubocop/rspec/support"
 require "find"
-require "byebug"
 require "timeout"
 
 $LOAD_PATH.unshift(File.expand_path("#{ENV.fetch("HOMEBREW_LIBRARY")}/Homebrew/test/support/lib"))
@@ -37,6 +41,8 @@ $LOAD_PATH.unshift(File.expand_path("#{ENV.fetch("HOMEBREW_LIBRARY")}/Homebrew/t
 require_relative "support/extend/cachable"
 
 require_relative "../global"
+
+require "debug" if ENV["HOMEBREW_DEBUG"]
 
 require "test/support/quiet_progress_formatter"
 require "test/support/helper/cask"
@@ -57,6 +63,7 @@ TEST_DIRECTORIES = [
   HOMEBREW_LOCKS,
   HOMEBREW_LOGS,
   HOMEBREW_TEMP,
+  HOMEBREW_ALIASES,
 ].freeze
 
 # Make `instance_double` and `class_double`
@@ -85,9 +92,9 @@ RSpec.configure do |config|
   # Use rspec-retry to handle flaky tests.
   config.default_sleep_interval = 1
 
-  # Don't want the nicer default retry behaviour when using BuildPulse to
+  # Don't want the nicer default retry behaviour when using CodeCov to
   # identify flaky tests.
-  config.default_retry_count = 2 unless ENV["BUILDPULSE"]
+  config.default_retry_count = 2 unless ENV["CODECOV_TOKEN"]
 
   config.expect_with :rspec do |expectations|
     # This option will default to `true` in RSpec 4. It makes the `description`
@@ -101,7 +108,7 @@ RSpec.configure do |config|
   end
   config.mock_with :rspec do |mocks|
     # Prevents you from mocking or stubbing a method that does not exist on
-    # a real object. This is generally recommended, and will default to
+    # a real object. This is generally recommended and will default to
     # `true` in RSpec 4.
     mocks.verify_partial_doubles = true
   end
@@ -116,9 +123,9 @@ RSpec.configure do |config|
   config.around(:each, :needs_network) do |example|
     example.metadata[:timeout] ||= 120
 
-    # Don't want the nicer default retry behaviour when using BuildPulse to
+    # Don't want the nicer default retry behaviour when using CodeCov to
     # identify flaky tests.
-    example.metadata[:retry] ||= 4 unless ENV["BUILDPULSE"]
+    example.metadata[:retry] ||= 4 unless ENV["CODECOV_TOKEN"]
 
     example.metadata[:retry_wait] ||= 2
     example.metadata[:exponential_backoff] ||= true
@@ -157,6 +164,11 @@ RSpec.configure do |config|
 
   config.before(:each, :needs_network) do
     skip "Requires network connection." unless ENV["HOMEBREW_TEST_ONLINE"]
+  end
+
+  config.before(:each, :needs_homebrew_core) do
+    core_tap_path = "#{ENV.fetch("HOMEBREW_LIBRARY")}/Taps/homebrew/homebrew-core"
+    skip "Requires homebrew/core to be tapped." unless Dir.exist?(core_tap_path)
   end
 
   config.before do |example|
@@ -230,14 +242,14 @@ RSpec.configure do |config|
     @__stdin = $stdin.clone
 
     begin
-      if !example.metadata.keys.intersect?([:focus, :byebug]) && !ENV.key?("HOMEBREW_VERBOSE_TESTS")
+      if example.metadata.keys.exclude?(:focus) && !ENV.key?("HOMEBREW_VERBOSE_TESTS")
         $stdout.reopen(File::NULL)
         $stderr.reopen(File::NULL)
+        $stdin.reopen(File::NULL)
       else
-        # don't retry when focusing/debugging
+        # don't retry when focusing
         config.default_retry_count = 0
       end
-      $stdin.reopen(File::NULL)
 
       begin
         timeout = example.metadata.fetch(:timeout, 60)
@@ -265,10 +277,9 @@ RSpec.configure do |config|
 
       FileUtils.rm_rf [
         *TEST_DIRECTORIES,
-        *Keg::MUST_EXIST_SUBDIRECTORIES,
+        *Keg.must_exist_subdirectories,
         HOMEBREW_LINKED_KEGS,
         HOMEBREW_PINNED_KEGS,
-        HOMEBREW_PREFIX/"var",
         HOMEBREW_PREFIX/"Caskroom",
         HOMEBREW_PREFIX/"Frameworks",
         HOMEBREW_LIBRARY/"Taps/homebrew/homebrew-cask",

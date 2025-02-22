@@ -22,19 +22,22 @@ RSpec.describe Homebrew::DevCmd::DetermineTestRunners do
   let(:ephemeral_suffix) { "-12345" }
   let(:runner_env) do
     {
-      "HOMEBREW_LINUX_RUNNER"  => linux_runner,
-      "HOMEBREW_MACOS_TIMEOUT" => "90",
-      "GITHUB_RUN_ID"          => ephemeral_suffix.split("-").second,
+      "HOMEBREW_LINUX_RUNNER"       => linux_runner,
+      "HOMEBREW_MACOS_LONG_TIMEOUT" => "false",
+      "GITHUB_RUN_ID"               => ephemeral_suffix.split("-").second,
     }.freeze
   end
   let(:all_runners) do
     out = []
     MacOSVersion::SYMBOLS.each_value do |v|
       macos_version = MacOSVersion.new(v)
-      next if macos_version.unsupported_release?
+      next if macos_version < GitHubRunnerMatrix::OLDEST_HOMEBREW_CORE_MACOS_RUNNER
+      next if macos_version > GitHubRunnerMatrix::NEWEST_HOMEBREW_CORE_MACOS_RUNNER
 
-      out << v
       out << "#{v}-arm64"
+      next if macos_version > GitHubRunnerMatrix::NEWEST_HOMEBREW_CORE_INTEL_MACOS_RUNNER
+
+      out << "#{v}-x86_64"
     end
 
     out << linux_runner

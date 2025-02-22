@@ -1,9 +1,7 @@
-# typed: true
+# typed: true # rubocop:todo Sorbet/StrictSigil
 # frozen_string_literal: true
 
 module Cask
-  #
-  # @api private
   class Reinstall
     def self.reinstall_casks(
       *casks,

@@ -1,3 +1,7 @@
+---
+last_review_date: "2025-02-08"
+---
+
 # Maintainer Guidelines
 
 **This guide is for maintainers.** These special people have **write access** to Homebrew’s repository and help merge the contributions of others. You may find what is written here interesting, but it’s definitely not a beginner’s guide.
@@ -11,7 +15,7 @@ All Homebrew maintainers are encouraged to contribute to all parts of the projec
 - `brew` maintainers: this team maintains the [`Homebrew/brew`](https://github.com/Homebrew/brew) repository. See the [Homebrew/brew Maintainer Guide](Homebrew-brew-Maintainer-Guide.md) for more details about being a `brew` maintainer.
 - Core maintainers: this team maintains the [`Homebrew/homebrew-core`](https://github.com/Homebrew/homebrew-core) repository. See the [Homebrew/homebrew-core Maintainer Guide](Homebrew-homebrew-core-Maintainer-Guide.md) for more details about being a core maintainer.
 - Linux maintainers: this team maintains the [`Homebrew/homebrew-core`](https://github.com/Homebrew/homebrew-core) repository on Linux.
-- Cask maintainers: this team maintains the [`Homebrew/homebrew-cask`](https://github.com/Homebrew/homebrew-cask), [`Homebrew/homebrew-cask-fonts`](https://github.com/Homebrew/homebrew-cask-fonts) and [`Homebrew/homebrew-cask-versions`](https://github.com/Homebrew/homebrew-cask-versions) repositories. See the [Homebrew/homebrew-cask Maintainer Guide](Homebrew-homebrew-cask-Maintainer-Guide.md) for more details about being a cask maintainer.
+- Cask maintainers: this team maintains the [`Homebrew/homebrew-cask`](https://github.com/Homebrew/homebrew-cask) repository. See the [Homebrew/homebrew-cask Maintainer Guide](Homebrew-homebrew-cask-Maintainer-Guide.md) for more details about being a cask maintainer.
 
 These documents are meant to serve as guiding principles. As a maintainer, you can make a call to either request changes from a contributor or help them out based on their comfort and previous contributions. Remember, as a team we [Prioritise Maintainers Over Users](Maintainers-Avoiding-Burnout.md) to avoid burnout. If you wish to change or discuss any of the guidelines: open a PR to suggest a change.
 
@@ -22,7 +26,8 @@ When reviewing a PR, use "approve", "approve with comments", "comment" or "reque
 - ✅ Approve: if you feel that the PR looks good as is, you can ✅ approve it as-is.
 - ✅ Approve with comments: if you have a few questions or comments to be answered and the PR can be merged after they are addressed, you can ✅ approve with comments.
   - Please trust that other maintainers will not merge the PR until the comments are addressed rather than e.g. making them wait another 24h to get another review.
-  - If auto-merge is enabled: you can disable it (add `automerge-skip` on homebrew-core/cask) if you want to ensure the PR is not merged until your comments are at least read.
+  - If auto-merge is enabled: don't worry, PRs need to have comments manually resolved before they are automatically merged.
+    Please feel free to ✅ approve or ✅ approve with comments even if others have just commented and it will not be merged until the author has resolved the comments.
 - 🗣️ Comment: if you need to ask questions before you can provide a ✅ approval but are fine with someone else providing a ✅ approval before you, provide a comment review and ask questions.
 - 🚫 Request changes: a last resort.
   - When reviewing non-maintainers' PRs: this means "these changes must be made before this PR should be merged by anyone".

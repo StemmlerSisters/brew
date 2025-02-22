@@ -1,3 +1,7 @@
+---
+last_review_date: "1970-01-01"
+---
+
 # Gems, Eggs and Perl Modules
 
 On a fresh macOS installation there are two empty directories for
@@ -128,7 +132,7 @@ subdirectories will be in your `PATH` and `PERL5LIB`.
 
 ### Avoiding sudo altogether for Perl
 
-If you don’t even want (or can’t) use sudo for bootstrapping
+If you don’t even want to (or can’t) use sudo for bootstrapping
 `local::lib`, just manually install `local::lib` in
 `~/perl5` and add the relevant path to `PERL5LIB` before the `.bashrc` eval incantation.
 
