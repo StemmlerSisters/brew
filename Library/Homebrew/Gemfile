@@ -45,7 +45,7 @@ group :style, optional: true do
   gem "rubocop-md", require: false
   gem "rubocop-performance", require: false
   gem "rubocop-rspec", require: false
-  gem "rubocop-sorbet", require: false
+  gem "rubocop-sorbet", ">= 0.10.2", require: false
 end
 group :tests, optional: true do
   gem "byebug", require: false
